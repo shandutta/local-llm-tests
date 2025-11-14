@@ -1,0 +1,6 @@
+# Local project artifacts
+*.log
+.env
+__pycache__/
+.virtualenv/
+.DS_Store
