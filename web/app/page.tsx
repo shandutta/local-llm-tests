@@ -46,6 +46,36 @@ const fetcher = async (path: string) => {
   return res.json();
 };
 
+const MATH_MACRO_PATTERN =
+  /\\(alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|omicron|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|frac|tfrac|sqrt|sum|prod|int|oint|log|ln|sin|cos|tan|csc|sec|cot|Re|Im|text|mathrm|mathbf|mathbb|mathcal|operatorname|partial|nabla|infty|cdot|pm|leq|geq|neq|approx|sim)/i;
+
+const normalizeMathDelimiters = (text: string) => {
+  if (!text) return text;
+  const convertSegment = (
+    value: string,
+    pattern: RegExp,
+    wrap: (expr: string) => string,
+  ) =>
+    value.replace(pattern, (full, expr) => {
+      if (!expr || !expr.includes("\\")) return full;
+      if (!MATH_MACRO_PATTERN.test(expr) && !/[{}_^]/.test(expr)) return full;
+      return wrap(expr.trim());
+    });
+
+  let normalized = text;
+  normalized = convertSegment(
+    normalized,
+    /\[\s*([\s\S]*?)\s*\]/g,
+    (expr) => `$$${expr}$$`,
+  );
+  normalized = convertSegment(
+    normalized,
+    /\(\s*([\s\S]*?)\s*\)/g,
+    (expr) => `$${expr}$`,
+  );
+  return normalized;
+};
+
 export default function Home() {
   const { data: manifest } = useSWR<ModelManifest>("/models", fetcher);
   const { data: status } = useSWR<StatusResponse>("/status", fetcher, {
@@ -66,6 +96,8 @@ export default function Home() {
   const [isStreaming, setIsStreaming] = useState(false);
 
   const isModelReady = selectedModel && selectedModel === activeModelName;
+  const supportsReasoningEffort =
+    selectedModel && selectedModel.toLowerCase() === "gpt-oss-120b";
 
   useEffect(() => {
     if (!selectedModel && manifest) {
@@ -432,12 +464,22 @@ export default function Home() {
                 <select
                   value={reasoning}
                   onChange={(e) => setReasoning(e.target.value as ReasoningEffort)}
-                  className="ml-2 rounded-lg border border-zinc-300 px-2 py-1 text-sm"
+                  disabled={!supportsReasoningEffort}
+                  className={`ml-2 rounded-lg border px-2 py-1 text-sm ${
+                    supportsReasoningEffort
+                      ? "border-zinc-300"
+                      : "cursor-not-allowed border-zinc-200 bg-zinc-100 text-zinc-400"
+                  }`}
                 >
                   <option value="low">Low</option>
                   <option value="medium">Medium</option>
                   <option value="high">High</option>
                 </select>
+                {!supportsReasoningEffort && (
+                  <span className="ml-2 text-xs text-zinc-400">
+                    (Only available for GPT-OSS)
+                  </span>
+                )}
               </label>
             </div>
           </div>
@@ -479,26 +521,26 @@ export default function Home() {
                             Reasoning trace
                           </summary>
                           <div className="prose prose-sm max-w-none text-zinc-800">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm, remarkMath]}
-                              rehypePlugins={[rehypeKatex]}
-                            >
-                              {analysis}
-                            </ReactMarkdown>
-                          </div>
-                        </details>
-                      )}
-                      <div className="prose prose-sm max-w-none text-zinc-800">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm, remarkMath]}
-                          rehypePlugins={[rehypeKatex]}
-                        >
-                          {final}
-                        </ReactMarkdown>
-                      </div>
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm, remarkMath]}
+                            rehypePlugins={[rehypeKatex]}
+                          >
+                            {normalizeMathDelimiters(analysis)}
+                          </ReactMarkdown>
+                        </div>
+                      </details>
+                    )}
+                    <div className="prose prose-sm max-w-none text-zinc-800">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm, remarkMath]}
+                        rehypePlugins={[rehypeKatex]}
+                      >
+                        {normalizeMathDelimiters(final)}
+                      </ReactMarkdown>
                     </div>
-                  );
-                })}
+                  </div>
+                );
+              })}
                 {streamingReply && (
                   <div className="text-sm leading-6">
                     <p className="font-semibold text-zinc-700">Assistant (streaming)</p>
@@ -507,7 +549,7 @@ export default function Home() {
                         remarkPlugins={[remarkGfm, remarkMath]}
                         rehypePlugins={[rehypeKatex]}
                       >
-                        {streamingReply}
+                        {normalizeMathDelimiters(streamingReply)}
                       </ReactMarkdown>
                     </div>
                   </div>

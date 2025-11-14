@@ -73,6 +73,37 @@ npm run dev:frontend
 # -> open http://localhost:3000 (or LAN IP) to manage models + chat
 ```
 
+## Desktop Launcher / One-Click Start
+
+For a single-click workflow there is now a stack launcher script plus desktop shortcuts:
+
+- `bin/local-llm-launcher.sh` – orchestrates the Docker model container, the FastAPI control plane (`uvicorn` on port 8008), and the Next.js frontend (`npm run dev:frontend`).  
+  - `bin/local-llm-launcher.sh start [--model <name>]` – stops any running model, starts the requested one, then boots the API and frontend in the background (logs under `.runtime/`).  
+  - `bin/local-llm-launcher.sh stop` – stops the frontend, API, and Docker container.  
+  - `bin/local-llm-launcher.sh status` – prints current state and log file locations.  
+  - Set `LOCAL_LLM_DEFAULT_MODEL` to change the default model the launcher starts.
+- `desktop/local-llm-start.desktop` and `desktop/local-llm-stop.desktop` – sample GNOME/KDE desktop entries wired to the launcher script.
+
+To install the desktop entries:
+
+```bash
+mkdir -p ~/.local/share/applications
+cp desktop/local-llm-*.desktop ~/.local/share/applications/
+chmod +x ~/.local/share/applications/local-llm-*.desktop
+```
+
+Most desktop environments will prompt you to “Trust” newly copied `.desktop` files the first time you launch them. Leave the `Terminal=true` setting enabled so you can view the launcher output (and any startup errors) when invoking from the desktop or application launcher.
+
+### Windows desktop shortcuts
+
+- `windows/local-llm-start.bat` and `windows/local-llm-stop.bat` wrap the launcher via `wsl.exe` so you can double-click from the Windows desktop/start menu. They automatically handle being run from a UNC path like `\\wsl.localhost\...` and force WSL to start in `/home/shan` (configurable) so you don’t hit the “Failed to translate Z:\…” error.
+- Copy the `.bat` files anywhere on Windows (for example `%USERPROFILE%\Desktop`) and create standard Windows shortcuts pointing to them if you prefer icons with custom names/icons.
+- By default they call your default WSL distro. If you need to target a specific distro name, set a user-level environment variable once:  
+  `setx LOCAL_LLM_WSL_DISTRO "YourDistroName"`
+- To change the WSL starting directory (before the script `cd`s into the repo), set  
+  `setx LOCAL_LLM_WSL_HOME "/home/youruser"`
+- The batch files pause after execution so you can read any errors; keep them in a visible terminal window to watch startup progress if desired.
+
 Environment variables:
 - `LOCAL_LLM_MODELS_DIR` (optional) overrides the host models root if the GGUF files move elsewhere. Defaults to `/home/shan/models` from the manifest.
 - `LLAMA_HOST` defaults to `0.0.0.0` so every LAN device can hit the container’s port.

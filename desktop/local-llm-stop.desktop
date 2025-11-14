@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Local LLM Stack (Stop)
+Comment=Stop the Docker model plus API and frontend
+Exec=/home/shan/local-llm-tests/bin/local-llm-launcher.sh stop
+Icon=utilities-terminal
+Terminal=true
+Type=Application
+Categories=Development;
