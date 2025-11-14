@@ -43,8 +43,17 @@ Objective: provide a single-control-plane experience for spinning up exactly one
 
 Start with Docker because llama.cpp already runs smoothly under WSL2 with CUDA. Build the container to mimic the current host setup and rely on environment variables/compose overrides to choose the model. Once that flow works, re-evaluate whether a full VM provides additional value.
 
+### Current Implementation Snapshot
+
+- `config/models.yaml` tracks available models (relative GGUF paths, ports, llama-server arguments).
+- `bin/local-llm` CLI orchestrates Docker Compose by writing `virtualization/docker/.env.runtime` and running `docker compose up|down`.
+- `virtualization/docker/Dockerfile` builds a CUDA-enabled llama.cpp binary inside the container; compose mounts the host `~/models` directory read-only.
+- `server/main.py` exposes REST endpoints (FastAPI) for `/models`, `/start`, `/stop`, `/restart`, and `/status`, so future tooling can steer the same Docker workflow without shelling out.
+- Port exposure uses the per-model `port` field so LAN devices can browse either GPT-OSS (8002) or Qwen (8001) depending on what is active.
+
 ## Next Steps
 
-1. Draft Dockerfile + compose skeleton under `virtualization/docker/`.
-2. Create a `models.yaml` manifest describing each model, port, and flag so scripts can load them dynamically.
-3. Implement CLI wrapper (`./bin/local-llm start <model>`) that validates no container is active, then launches the chosen compose profile.
+1. Add health checks/metrics export (nvidia-smi sampler, llama-server logs) that can be scraped outside the container.
+2. Provide optional auth/reverse proxy layer for LAN exposure (e.g., Caddy or Traefik sidecar).
+3. Prototype lightweight VM alternative for environments where Docker GPU pass-through is unavailable or undesirable.
+4. Harden the new Next.js chat console: stream assistant output via SSE, persist conversations, surface Harmony reasoning effort presets, and clean GPT-OSS channel tags client-side before exposing the UI broadly.

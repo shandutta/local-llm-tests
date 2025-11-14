@@ -1,6 +1,9 @@
 # Local project artifacts
 *.log
 .env
+.env.local
+.env.*
+virtualization/docker/.env.runtime
 __pycache__/
 .virtualenv/
 .DS_Store

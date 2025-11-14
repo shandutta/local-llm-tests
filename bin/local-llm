@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Helper CLI to orchestrate Dockerized llama.cpp deployments."""
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+MANIFEST = ROOT / "config" / "models.yaml"
+COMPOSE_FILE = ROOT / "virtualization" / "docker" / "docker-compose.yaml"
+ENV_FILE = ROOT / "virtualization" / "docker" / ".env.runtime"
+
+
+def load_manifest():
+    if not MANIFEST.exists():
+        sys.exit(f"models manifest not found: {MANIFEST}")
+    try:
+        data = json.loads(MANIFEST.read_text())
+    except json.JSONDecodeError as exc:
+        sys.exit(f"failed to parse {MANIFEST}: {exc}")
+    models = data.get("models", {})
+    if not models:
+        sys.exit("no models defined in manifest")
+    defaults = data.get("defaults", {})
+    return defaults, models
+
+
+def ensure_models_dir(host_dir: str) -> Path:
+    path = Path(host_dir).expanduser()
+    if not path.exists():
+        sys.exit(f"host models directory missing: {path}")
+    return path
+
+
+def compose_cmd(env_required: bool, *extra):
+    cmd = ["docker", "compose", "-f", str(COMPOSE_FILE)]
+    if env_required:
+        if not ENV_FILE.exists():
+            sys.exit(f"env file missing: {ENV_FILE}. start a model first.")
+        cmd.extend(["--env-file", str(ENV_FILE)])
+    else:
+        cmd.extend(["--env-file", str(ENV_FILE)])
+    cmd.extend(extra)
+    return cmd
+
+
+def list_models(models):
+    for name, spec in models.items():
+        desc = spec.get("description", "")
+        port = spec.get("port", "?")
+        print(f"{name:15} port={port}  {desc}")
+
+
+def write_env(values):
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with ENV_FILE.open("w", encoding="utf-8") as handle:
+        for key, val in values.items():
+            handle.write(f"{key}={val}\n")
+
+
+def generate_env(model_name: str, spec: dict, defaults: dict):
+    host_models_dir = os.environ.get(
+        "LOCAL_LLM_MODELS_DIR", defaults.get("host_models_dir", "~/models")
+    )
+    container_models_dir = defaults.get("container_models_dir", "/models")
+    host_root = ensure_models_dir(host_models_dir)
+    rel_path = spec.get("relative_path")
+    if not rel_path:
+        sys.exit(f"model {model_name} missing relative_path")
+    host_model_file = host_root / rel_path
+    if not host_model_file.exists():
+        sys.exit(f"model file not found: {host_model_file}")
+    container_model_path = str(Path(container_models_dir) / rel_path)
+    arguments = spec.get("arguments", [])
+    if not isinstance(arguments, list):
+        sys.exit(f"model {model_name} arguments must be a list")
+    port = int(spec.get("port", 8000))
+    host = defaults.get("llama_host", "0.0.0.0")
+    env_values = {
+        "MODEL_NAME": model_name,
+        "HOST_MODELS_DIR": str(host_root),
+        "CONTAINER_MODELS_DIR": container_models_dir,
+        "MODEL_PATH": container_model_path,
+        "SERVER_PORT": str(port),
+        "LLAMA_HOST": host,
+        "LLAMA_JSON_ARGS": json.dumps(arguments),
+        "CONTAINER_NAME": f"llm-{model_name}",
+        "COMPOSE_PROJECT_NAME": f"llm-{model_name}",
+    }
+    return env_values
+
+
+def start_model(model_name: str, defaults: dict, models: dict):
+    if model_name not in models:
+        sys.exit(f"unknown model '{model_name}'. Run 'local-llm list'.")
+    env_values = generate_env(model_name, models[model_name], defaults)
+    write_env(env_values)
+    cmd = compose_cmd(False, "up", "-d", "--build")
+    print("+", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def stop_model():
+    cmd = compose_cmd(True, "down")
+    print("+", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def show_status():
+    cmd = compose_cmd(True, "ps")
+    subprocess.run(cmd, check=True)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(prog="local-llm")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    start = sub.add_parser("start", help="start a model by name")
+    start.add_argument("model")
+
+    sub.add_parser("stop", help="stop any running container")
+    sub.add_parser("status", help="show docker compose status")
+    sub.add_parser("list", help="list available models")
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    defaults, models = load_manifest()
+    if args.command == "list":
+        list_models(models)
+        return
+    if args.command == "start":
+        start_model(args.model, defaults, models)
+    elif args.command == "stop":
+        stop_model()
+    elif args.command == "status":
+        show_status()
+
+
+if __name__ == "__main__":
+    main()

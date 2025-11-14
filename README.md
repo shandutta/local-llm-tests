@@ -31,16 +31,60 @@ This repo tracks the higher-level orchestration work:
 
 ## Roadmap
 
-- [ ] Define requirements for “single-model” virtualization (resource limits, networking, volume mounts).
-- [ ] Prototype Docker image / compose file that wraps `llama-server` and model selection.
-- [ ] Add helper CLI to stop currently running model and start a new one safely (handles VRAM exclusivity).
+- [x] Define requirements for “single-model” virtualization (resource limits, networking, volume mounts).
+- [x] Prototype Docker image / compose file that wraps `llama-server` and model selection.
+- [x] Add helper CLI to stop currently running model and start a new one safely (handles VRAM exclusivity).
 - [ ] Integrate health monitoring (nvidia-smi snapshots, logs) for remote visibility.
+- [ ] Build lightweight VM option if Docker access to the RTX 5090 ever becomes problematic.
+
+## Docker Orchestration (MVP)
+
+The first virtualization target is Docker + NVIDIA Container Toolkit. The repo now contains:
+
+- `config/models.yaml` – manifest describing each model, GGUF relative path (relative to a host models directory), and the llama-server flags needed for that profile.
+- `bin/local-llm` – helper CLI (`start`, `stop`, `status`, `list`) that reads the manifest, validates GGUF files, writes an `.env` file, and drives Docker Compose.
+- `virtualization/docker/Dockerfile` – CUDA 12.6 based image that builds llama.cpp from source with `-DGGML_CUDA=ON`.
+- `virtualization/docker/docker-compose.yaml` – single-service compose file that binds the selected model file read-only into the container, exposes the requested port to the LAN, and requests the GPU.
+- `server/` – FastAPI orchestration service that exposes REST endpoints to list models, start/stop containers, proxy Harmony-formatted chat streams (via `/chat`), and report Docker status so future UIs can drive the stack without shell access.
+- `web/` – Next.js control center that consumes the FastAPI service; includes model cards, start/stop buttons, and a basic chat console with Harmony reasoning-effort selector.
+
+Usage (once Docker Desktop + nvidia-container-toolkit are configured inside WSL2):
+
+```bash
+# List configured models (names + ports)
+./bin/local-llm list
+
+# Start exactly one model (writes virtualization/docker/.env.runtime and runs docker compose up -d --build)
+./bin/local-llm start gpt-oss-120b
+
+# Show status or stop the running container
+./bin/local-llm status
+./bin/local-llm stop
+
+# Optional: interact through the REST API instead of the CLI
+pip install -r server/requirements.txt
+uvicorn server.main:app --reload --port 8008
+# -> GET http://localhost:8008/models, POST /start {"model":"gpt-oss-120b"}, POST /chat {...}, etc.
+
+# Frontend (Next.js) control panel + Harmony chat console
+cd web
+npm install
+npm run dev:frontend
+# -> open http://localhost:3000 (or LAN IP) to manage models + chat
+```
+
+Environment variables:
+- `LOCAL_LLM_MODELS_DIR` (optional) overrides the host models root if the GGUF files move elsewhere. Defaults to `/home/shan/models` from the manifest.
+- `LLAMA_HOST` defaults to `0.0.0.0` so every LAN device can hit the container’s port.
+
+All model-specific llama-server flags remain inside `config/models.yaml`, so swapping/adding new GGUF files is just an edit + commit without touching the docker artifacts.
 
 ## Contributing / Next Actions
 
 1. Keep `/home/shan/llama.cpp` up to date (`git pull` and rebuild) to benefit from CUDA/MoE improvements.
 2. Capture benchmark data as models/configurations change – update this README regularly.
 3. Once Docker/VM design is ready, add the relevant files under a `virtualization/` directory and document usage.
+4. Flesh out the new frontend chat console with proper message history, SSE parsing, Harmony reasoning-effort presets, and (eventually) GPT-OSS channel-tag cleanup plus authentication for remote access.
 
 "Local LLM Tests" is meant to become the GitHub project that tracks all of the above so progress can be pushed/shareable. Push instructions are documented below.
 

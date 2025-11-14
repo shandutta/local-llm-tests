@@ -1,0 +1,25 @@
+services:
+  llama:
+    container_name: ${CONTAINER_NAME:-local-llm}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        LLAMA_CPP_REF: master
+    environment:
+      MODEL_PATH: ${MODEL_PATH:?MODEL_PATH not set}
+      SERVER_PORT: ${SERVER_PORT:-8000}
+      LLAMA_HOST: ${LLAMA_HOST:-0.0.0.0}
+      LLAMA_JSON_ARGS: ${LLAMA_JSON_ARGS:?LLAMA_JSON_ARGS not set}
+    volumes:
+      - ${HOST_MODELS_DIR:-/home/shan/models}:${CONTAINER_MODELS_DIR:-/models}:ro
+    ports:
+      - "${SERVER_PORT:-8000}:${SERVER_PORT:-8000}"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
