@@ -3,7 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import useSWR from "swr";
+import "katex/dist/katex.min.css";
 
 type ModelManifest = {
   defaults?: Record<string, unknown>;
@@ -57,9 +60,12 @@ export default function Home() {
   const [reasoning, setReasoning] = useState<ReasoningEffort>("medium");
   const [progress, setProgress] = useState(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatStatus, setChatStatus] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [streamingReply, setStreamingReply] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+
+  const isModelReady = selectedModel && selectedModel === activeModelName;
 
   useEffect(() => {
     if (!selectedModel && manifest) {
@@ -73,12 +79,13 @@ export default function Home() {
     if (!manifest || !status?.containers) return models;
     Object.entries(manifest.models ?? {}).forEach(([name]) => {
       const expectedName = `llm-${name}`;
-      const matched = status.containers?.some(
-        (container) =>
+      const matched = status.containers?.some((container) => {
+        const state = container.state?.toLowerCase() ?? "";
+        return (
           container.name?.includes(expectedName) &&
-          (container.state?.toLowerCase().includes("up") ||
-            container.state?.toLowerCase().includes("running")),
-      );
+          (state.includes("up") || state.includes("running"))
+        );
+      });
       if (matched) models.add(name);
     });
     return models;
@@ -121,6 +128,27 @@ export default function Home() {
     return () => clearInterval(timer);
   }, [pendingAction, isModelBusy]);
 
+  const handleCardKeydown = (
+    e: React.KeyboardEvent<HTMLDivElement>,
+    modelName: string,
+  ) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      setSelectedModel(modelName);
+    }
+  };
+
+  const parseGptOssContent = (content: string) => {
+    const analysisMatch = content.match(
+      /<\|channel\|>analysis([\s\S]*?)<\|end\|>/,
+    );
+    const finalMatch = content.match(/<\|channel\|>final([\s\S]*)$/i);
+    return {
+      analysis: analysisMatch?.[1]?.trim(),
+      final: finalMatch?.[1]?.trim() ?? content,
+    };
+  };
+
   const sendMessage = async () => {
     if (!selectedModel || !input.trim()) return;
     const outbound: ChatMessage = { role: "user", content: input.trim() };
@@ -130,20 +158,63 @@ export default function Home() {
     setStreamingReply("");
     setIsStreaming(true);
 
+    let retries = 0;
+    const maxRetries = 6;
+    let response: Response | null = null;
+
     try {
-      const response = await fetch(`${apiBase}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: selectedModel,
-          reasoning_effort: reasoning,
-          messages: nextHistory,
-        }),
-      });
+      while (retries <= maxRetries) {
+        response = await fetch(`${apiBase}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: selectedModel,
+            reasoning_effort: reasoning,
+            messages: nextHistory,
+          }),
+        });
+
+        if (response.status === 503) {
+          retries += 1;
+          if (retries > maxRetries) break;
+          setChatStatus(
+            `Model is still loading… retrying (${retries}/${maxRetries})`,
+          );
+          const delay = Math.min(4000 * retries, 15000);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+
+        break;
+      }
+
+      setChatStatus(null);
+
+      if (!response) {
+        throw new Error("Chat request failed: no response");
+      }
+
+      if (response.status === 503) {
+        setChatStatus(
+          "Model is still loading after several attempts. Please try again in a moment.",
+        );
+        setIsStreaming(false);
+        return;
+      }
 
       if (!response.ok || !response.body) {
         const errorText = await response.text();
-        throw new Error(errorText || "Chat request failed");
+        let message = errorText || "Chat request failed";
+        try {
+          const parsed = JSON.parse(errorText);
+          message =
+            parsed?.detail?.error?.message ||
+            parsed?.error?.message ||
+            message;
+        } catch {
+          // ignore JSON parse errors
+        }
+        throw new Error(message);
       }
 
       const reader = response.body.getReader();
@@ -157,17 +228,26 @@ export default function Home() {
         buffer += decoder.decode(value, { stream: true });
         const events = buffer.split("\n\n");
         buffer = events.pop() ?? "";
+
         for (const event of events) {
-          const line = event.trim();
-          if (!line || line === "data: [DONE]") continue;
-          const payloadRaw = line.replace(/^data:\s*/, "");
+          if (!event.trim()) continue;
+          const lines = event.split("\n").map((line) => line.trim());
+          const dataLine = lines.find((line) => line.startsWith("data:"));
+          if (!dataLine) continue;
+          if (dataLine === "data: [DONE]") {
+            buffer = "";
+            break;
+          }
+          const payloadRaw = dataLine.replace(/^data:\s*/, "");
           try {
             const payload = JSON.parse(payloadRaw);
             const delta =
               payload?.choices?.[0]?.delta?.content ??
               payload?.choices?.[0]?.text ??
               payload?.token?.text ??
+              payload?.content ??
               "";
+            if (!delta) continue;
             assistantText += delta;
             setStreamingReply(assistantText);
           } catch {
@@ -180,6 +260,9 @@ export default function Home() {
       setStreamingReply("");
     } catch (err) {
       console.error(err);
+      setChatStatus(
+        err instanceof Error ? err.message : "Chat service unavailable",
+      );
       setMessages((prev) => [
         ...prev,
         {
@@ -191,6 +274,15 @@ export default function Home() {
       ]);
     } finally {
       setIsStreaming(false);
+    }
+  };
+
+  const handleTextareaKeyDown = (
+    e: React.KeyboardEvent<HTMLTextAreaElement>,
+  ) => {
+    if (e.key === "Enter" && e.ctrlKey) {
+      e.preventDefault();
+      sendMessage();
     }
   };
 
@@ -232,14 +324,17 @@ export default function Home() {
                   pendingAction === "stop" &&
                   pendingModel === name;
                 return (
-                  <button
+                  <div
                     key={name}
-                    onClick={() => setSelectedModel(name)}
                     className={`rounded-xl border p-4 text-left transition ${
                       selectedModel === name
                         ? "border-sky-500 bg-sky-50"
                         : "border-zinc-200 bg-zinc-50 hover:border-zinc-300"
                     }`}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setSelectedModel(name)}
+                    onKeyDown={(e) => handleCardKeydown(e, name)}
                   >
                     <div className="flex items-center justify-between">
                       <div>
@@ -264,7 +359,7 @@ export default function Home() {
                     <p className="mt-2 text-sm text-zinc-600">
                       {model.description ?? "No description provided."}
                     </p>
-                  <div className="mt-4 flex gap-2 text-sm text-zinc-500">
+                    <div className="mt-4 flex gap-2 text-sm text-zinc-500">
                       <button
                         className="rounded-full bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
                         disabled={
@@ -316,7 +411,7 @@ export default function Home() {
                         {isPendingStop ? "Stopping…" : "Stop"}
                       </button>
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -348,9 +443,14 @@ export default function Home() {
           </div>
 
           <div className="mt-6 space-y-4 rounded-xl border border-dashed border-zinc-200 bg-zinc-50 p-4">
+            {chatStatus && (
+              <p className="rounded-lg bg-amber-100 px-3 py-2 text-sm text-amber-800">
+                {chatStatus}
+              </p>
+            )}
             {!selectedModel ? (
               <p className="text-sm text-zinc-500">Select a model to begin.</p>
-            ) : selectedModel !== activeModelName ? (
+            ) : !isModelReady ? (
               <p className="text-sm text-zinc-500">
                 {isModelBusy
                   ? "Starting the model…"
@@ -365,12 +465,35 @@ export default function Home() {
                 {messages.map((msg, idx) => {
                   const prettyRole =
                     msg.role.charAt(0).toUpperCase() + msg.role.slice(1);
+                  const { analysis, final } = msg.content.includes(
+                    "<|channel|>analysis",
+                  )
+                    ? parseGptOssContent(msg.content)
+                    : { analysis: undefined, final: msg.content };
                   return (
                     <div key={`${msg.role}-${idx}`} className="text-sm leading-6">
                       <p className="font-semibold text-zinc-700">{prettyRole}</p>
+                      {analysis && (
+                        <details className="mb-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600">
+                          <summary className="cursor-pointer select-none text-zinc-700">
+                            Reasoning trace
+                          </summary>
+                          <div className="prose prose-sm max-w-none text-zinc-800">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm, remarkMath]}
+                              rehypePlugins={[rehypeKatex]}
+                            >
+                              {analysis}
+                            </ReactMarkdown>
+                          </div>
+                        </details>
+                      )}
                       <div className="prose prose-sm max-w-none text-zinc-800">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {msg.content}
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkMath]}
+                          rehypePlugins={[rehypeKatex]}
+                        >
+                          {final}
                         </ReactMarkdown>
                       </div>
                     </div>
@@ -380,7 +503,10 @@ export default function Home() {
                   <div className="text-sm leading-6">
                     <p className="font-semibold text-zinc-700">Assistant (streaming)</p>
                     <div className="prose prose-sm max-w-none text-zinc-800">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm, remarkMath]}
+                        rehypePlugins={[rehypeKatex]}
+                      >
                         {streamingReply}
                       </ReactMarkdown>
                     </div>
@@ -400,14 +526,14 @@ export default function Home() {
               disabled={
                 !selectedModel ||
                 isStreaming ||
-                selectedModel !== activeModelName
+                !isModelReady
               }
             />
             <button
               disabled={
                 !selectedModel ||
                 isStreaming ||
-                selectedModel !== activeModelName
+                !isModelReady
               }
               onClick={sendMessage}
               className="rounded-xl bg-zinc-900 px-6 py-3 text-white disabled:opacity-50"

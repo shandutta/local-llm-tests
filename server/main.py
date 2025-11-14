@@ -237,10 +237,12 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         endpoint = f'{base_url}/v1/chat/completions'
 
     client = httpx.AsyncClient(timeout=None)
-    response = await client.stream('POST', endpoint, json=llama_payload)
+    stream_ctx = client.stream('POST', endpoint, json=llama_payload)
+    response = await stream_ctx.__aenter__()
+
     if response.status_code != 200:
         body = await response.aread()
-        await response.aclose()
+        await stream_ctx.__aexit__(None, None, None)
         await client.aclose()
         raise HTTPException(
             status_code=response.status_code,
@@ -252,7 +254,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             async for chunk in response.aiter_bytes():
                 yield chunk
         finally:
-            await response.aclose()
+            await stream_ctx.__aexit__(None, None, None)
             await client.aclose()
 
     return StreamingResponse(stream_llama(), media_type='text/event-stream')
