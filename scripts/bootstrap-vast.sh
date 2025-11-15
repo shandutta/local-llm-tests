@@ -55,11 +55,11 @@ echo "[bootstrap] Installing Hugging Face CLI…"
 pip3 install --upgrade "huggingface_hub"
 
 echo "[bootstrap] Logging into Hugging Face…"
-python3 -m huggingface_hub.cli login --token "$HF_TOKEN" --add-to-git-credential --non-interactive >/dev/null
+python3 -m huggingface_hub.cli.hf login --token "$HF_TOKEN" --add-to-git-credential --non-interactive >/dev/null
 
 echo "[bootstrap] Downloading $MODEL_REPO into $MODEL_DIR …"
 mkdir -p "$MODEL_DIR"
-HF_HUB_DISABLE_SYMLINKS=1 python3 -m huggingface_hub.cli download \
+HF_HUB_DISABLE_SYMLINKS=1 python3 -m huggingface_hub.cli.hf download \
   "$MODEL_REPO" \
   --repo-type model \
   --local-dir "$MODEL_DIR" \
