@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_FILE="$ROOT/virtualization/vllm/docker-compose.yaml"
+ENV_FILE="$ROOT/virtualization/vllm/.env.vllm"
+ENV_TEMPLATE="$ROOT/virtualization/vllm/.env.example"
+
+ensure_env_file() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    if [[ -f "$ENV_TEMPLATE" ]]; then
+      cp "$ENV_TEMPLATE" "$ENV_FILE"
+      echo "[local-vllm] Created $ENV_FILE – update MODEL_PATH, HF_TOKEN, etc. before starting."
+    else
+      echo "[local-vllm] Missing env template at $ENV_TEMPLATE" >&2
+      exit 1
+    fi
+  fi
+}
+
+cmd=${1:-}
+case "$cmd" in
+  start)
+    ensure_env_file
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d --build
+    ;;
+  stop)
+    ensure_env_file
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" down
+    ;;
+  status)
+    ensure_env_file
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps
+    ;;
+  logs)
+    ensure_env_file
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs -f
+    ;;
+  *)
+    cat <<'EOF'
+Usage: bin/local-vllm <start|stop|status|logs>
+
+Manages the vLLM-based Qwen3 Coder 30B FP4 stack. Update virtualization/vllm/.env.vllm
+with your Hugging Face token, FP4 model path, and API key before running.
+EOF
+    exit 1
+    ;;
+esac

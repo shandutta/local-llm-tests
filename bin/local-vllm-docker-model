@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="$ROOT/virtualization/vllm/.env.vllm"
+ENV_TEMPLATE="$ROOT/virtualization/vllm/.env.example"
+IMAGE="${VLLM_DOCKER_IMAGE:-vllm/vllm-openai:latest}"
+
+ensure_env() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    if [[ -f "$ENV_TEMPLATE" ]]; then
+      cp "$ENV_TEMPLATE" "$ENV_FILE"
+      echo "[local-vllm-docker-model] Created $ENV_FILE – edit it before running again."
+    fi
+    echo "[local-vllm-docker-model] Missing env file: $ENV_FILE" >&2
+    exit 1
+  fi
+}
+
+load_env() {
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+}
+
+run_model() {
+  ensure_env
+  load_env
+
+  local name="${VLLM_CONTAINER_NAME:-vllm-qwen3-coder-30b}"
+  local port="${VLLM_PORT:-8004}"
+  local host_models="${HOST_MODELS_DIR:-$HOME/models}"
+  local container_models="${CONTAINER_MODELS_DIR:-/models}"
+  local tokenizer="${TOKENIZER_PATH:-$MODEL_PATH}"
+  local tensor_parallel="${TENSOR_PARALLEL:-1}"
+  local gpu_util="${GPU_MEMORY_UTILIZATION:-0.9}"
+  local max_len="${MAX_MODEL_LEN:-8192}"
+  local max_seqs="${MAX_NUM_SEQS:-96}"
+  local dtype="${DTYPE:-auto}"
+  local eager="${ENFORCE_EAGER:-True}"
+  local api_key="${VLLM_API_KEY:-local-dev}"
+
+  docker model run \
+    --name "$name" \
+    --gpus all \
+    --port "${port}:8000" \
+    --env HF_TOKEN="${HF_TOKEN:-}" \
+    --env VLLM_WORKER_USE_NATIVE_SCHEDULER=1 \
+    --mount type=bind,src="$host_models",target="$container_models",readonly \
+    "$IMAGE" \
+    --model "$MODEL_PATH" \
+    --tokenizer "$tokenizer" \
+    --max-model-len "$max_len" \
+    --tensor-parallel-size "$tensor_parallel" \
+    --gpu-memory-utilization "$gpu_util" \
+    --max-num-seqs "$max_seqs" \
+    --dtype "$dtype" \
+    --enforce-eager "$eager" \
+    --trust-remote-code \
+    --api-key "$api_key"
+}
+
+stop_model() {
+  ensure_env
+  load_env
+  local name="${VLLM_CONTAINER_NAME:-vllm-qwen3-coder-30b}"
+  docker model stop "$name"
+}
+
+status_model() {
+  docker model list
+}
+
+logs_model() {
+  ensure_env
+  load_env
+  local name="${VLLM_CONTAINER_NAME:-vllm-qwen3-coder-30b}"
+  docker logs -f "$name"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: bin/local-vllm-docker-model <start|stop|status|logs>
+
+Runs Qwen3 Coder 30B (FP4) with Docker Model Runner instead of docker compose.
+Edit virtualization/vllm/.env.vllm first (model paths, API key, limits).
+EOF
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  start) run_model ;;
+  stop) stop_model ;;
+  status) status_model ;;
+  logs) logs_model ;;
+  *) usage; exit 1 ;;
+esac
