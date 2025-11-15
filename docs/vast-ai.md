@@ -29,8 +29,8 @@ Environment variables:
 
 The script performs:
 
-1. `apt install` of Docker, fuse-overlayfs, python/pip, huggingface CLI, etc.
-2. `huggingface-cli login` using your token (non-interactive).
+1. `apt install` of Docker, fuse-overlayfs, python/pip, Hugging Face CLI dependencies, etc.
+2. `python3 -m huggingface_hub.cli login` using your token (non-interactive).
 3. Download of the FP8 checkpoint to `/root/models/<subdir>`.
 4. Creation of `virtualization/vllm/.env.vllm` with sane defaults.
 5. Starting `dockerd` in a “headless” mode (no iptables).
