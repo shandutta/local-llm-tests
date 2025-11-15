@@ -1,8 +1,8 @@
-# vLLM + Qwen3 Coder 30B FP4 Stack
+# vLLM + Qwen3 Coder 30B FP8 Stack
 
-To keep VRAM usage manageable on 32 GB GPUs, this variant uses NVIDIA’s FP4 (W4A4) checkpoint [`NVFP4/Qwen3-Coder-30B-A3B-Instruct-FP4`](https://huggingface.co/NVFP4/Qwen3-Coder-30B-A3B-Instruct-FP4). FP4 still runs through [vLLM](https://github.com/vllm-project/vllm) and exposes the same OpenAI-compatible endpoint, but frees enough memory to keep longer contexts and larger KV caches compared with FP8.
+This mirrors the Vast.ai walkthrough from the video: FP8 Qwen3 Coder 30B served through [vLLM](https://github.com/vllm-project/vllm) with Harmony-compatible streaming. The default checkpoint is [`Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8`](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8).
 
-## 1. Download the FP4 checkpoint
+## 1. Download the FP8 checkpoint
 
 1. Install or update the Hugging Face CLI (`hf`):
    ```bash
@@ -12,21 +12,21 @@ To keep VRAM usage manageable on 32 GB GPUs, this variant uses NVIDIA’s FP4 
    ```bash
    hf auth login
    ```
-3. Pull the FP4 weights and tokenizer somewhere under your models directory (default `~/models`). Either clone via Git LFS:
+3. Pull the FP8 weights and tokenizer somewhere under your models directory (default `~/models`). Either clone via Git LFS:
    ```bash
    git lfs install
-   git clone https://huggingface.co/NVFP4/Qwen3-Coder-30B-A3B-Instruct-FP4 \
-     ~/models/nvfp4-qwen3-coder-30b-a3b
+   git clone https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
+     ~/models/qwen3-coder-30b-a3b-fp8
    ```
    or use the CLI (`HF_HUB_DISABLE_SYMLINKS=1` ensures regular files instead of symlinks):
    ```bash
-   HF_HUB_DISABLE_SYMLINKS=1 hf download NVFP4/Qwen3-Coder-30B-A3B-Instruct-FP4 \
+   HF_HUB_DISABLE_SYMLINKS=1 hf download Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 \
      --repo-type model \
-     --local-dir ~/models/nvfp4-qwen3-coder-30b-a3b
+     --local-dir ~/models/qwen3-coder-30b-a3b-fp8
    ```
    If you already cloned the FP8 variant earlier, you can safely delete that folder after copying any notes or custom configs over.
 
-The vLLM image loads the raw `safetensors` and tokenizer JSON instead of GGUF files, so no conversion is required. Any other FP4 or FP8 checkpoint will work as long as `MODEL_PATH` and `TOKENIZER_PATH` point at the directory with `config.json`, tokenizer files, and `model.safetensors`.
+The vLLM image loads the raw `safetensors` and tokenizer JSON instead of GGUF files, so no conversion is required. Any other FP8/FP4 checkpoint will work as long as `MODEL_PATH` and `TOKENIZER_PATH` point at the directory with `config.json`, tokenizer files, and `model.safetensors`.
 
 ## 2. Configure the vLLM compose stack
 
@@ -35,7 +35,7 @@ The vLLM image loads the raw `safetensors` and tokenizer JSON instead of GGUF fi
    cp virtualization/vllm/.env.example virtualization/vllm/.env.vllm
    ```
 2. Update `.env.vllm`:
-   - `HOST_MODELS_DIR` → where you stored the FP4 files (e.g., `~/models/nvfp4-qwen3-coder-30b-a3b`).
+   - `HOST_MODELS_DIR` → where you stored the FP8 files (e.g., `~/models/qwen3-coder-30b-a3b-fp8`).
    - `MODEL_PATH` / `TOKENIZER_PATH` → container paths (default `/models/...`).
    - `HF_TOKEN` → optional if you need vLLM to pull missing assets.
    - `VLLM_API_KEY` → arbitrary key required by the OpenAI endpoint (use the same key in your IDE).
@@ -64,7 +64,7 @@ The container uses NVIDIA Container Toolkit, so Docker must be able to see your 
 If you prefer Docker’s experimental `docker model` workflow (nice for bundling with other compose stacks or CI jobs), use the second helper:
 
 ```bash
-# Start FP4 Qwen3 via docker model run
+# Start FP8 Qwen3 via docker model run
 bin/local-vllm-docker-model start
 
 # Check status / follow logs / stop
@@ -77,14 +77,14 @@ Under the hood, it runs:
 
 ```bash
 docker model run \
-  --name nvfp4-qwen3-coder-30b-a3b \
+  --name qwen3-coder-30b-a3b-fp8 \
   --gpus all \
   --port 8004:8000 \
   --env HF_TOKEN=... \
   --mount type=bind,src=$HOME/models,target=/models,readonly \
   vllm/vllm-openai:latest \
-  --model /models/nvfp4-qwen3-coder-30b-a3b \
-  --tokenizer /models/nvfp4-qwen3-coder-30b-a3b \
+  --model /models/qwen3-coder-30b-a3b-fp8 \
+  --tokenizer /models/qwen3-coder-30b-a3b-fp8 \
   --max-model-len 8192 \
   --tensor-parallel-size 1 \
   --gpu-memory-utilization 0.92 \
@@ -99,7 +99,7 @@ docker model run \
 
 vLLM’s OpenAI server lives at `http://<host>:<VLLM_PORT>/v1` and requires the API key you set in `.env.vllm`.
 
-- **Continue / VS Code** – add a new OpenAI provider that points to `http://<lan-ip>:8004/v1`, set the API key, and pick `nvfp4-qwen3-coder-30b-a3b` (or any alias you prefer). Continue can use this endpoint for both chat and inline completions.
+- **Continue / VS Code** – add a new OpenAI provider that points to `http://<lan-ip>:8004/v1`, set the API key, and pick `qwen3-coder-30b-a3b-fp8` (or any alias you prefer). Continue can use this endpoint for both chat and inline completions.
 - **Cursor, Zed, Windsurf, etc.** – most IDEs that support custom OpenAI endpoints accept the same URL/key combo.
 - **SSH from anywhere** – keep the GPU box on and expose port `8004`. For extra safety, tunnel through SSH instead of opening a firewall hole:
   ```bash
@@ -114,7 +114,7 @@ Because vLLM batches and streams requests, you can run many concurrent completio
 Nothing in the original `bin/local-llm` flow changes. You can:
 
 1. Keep GPT‑OSS or GGUF Qwen in `local-llm`.
-2. Run `bin/local-vllm start` (or `bin/local-vllm-docker-model start`) for the FP4/vLLM stack when you need IDE completions.
+2. Run `bin/local-vllm start` (or `bin/local-vllm-docker-model start`) for the FP8/vLLM stack when you need IDE completions.
 3. Point Continue/VS Code to whichever endpoint you need (Harmony proxy on FastAPI vs. vLLM OpenAI).
 
 This separation also makes it easy to leave the vLLM container running on the GPU workstation, SSH into it from your Mac/WSL machine, and keep the browser-based control center for llama.cpp duties.

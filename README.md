@@ -83,7 +83,7 @@ For a single-click workflow there is now a stack launcher script plus desktop sh
   - `bin/local-llm-launcher.sh status` – prints current state and log file locations.  
   - Set `LOCAL_LLM_DEFAULT_MODEL` to change the default model the launcher starts.
 - `desktop/local-llm-start.desktop` and `desktop/local-llm-stop.desktop` – sample GNOME/KDE desktop entries wired to the launcher script.
-- `bin/local-vllm` + `virtualization/vllm/` – optional vLLM-based stack for FP4 Qwen3 Coder 30B (OpenAI-compatible endpoint optimized for IDE code completion). See `docs/vllm-code-completion.md` for both the docker compose and Docker Model Runner flows (`bin/local-vllm-docker-model`).
+- `bin/local-vllm` + `virtualization/vllm/` – optional vLLM-based stack for Qwen3 Coder 30B (FP8 by default). See `docs/vllm-code-completion.md` for local usage and `docs/vast-ai.md` for spinning it up on a Vast.ai server via `scripts/bootstrap-vast.sh`.
 
 To install the desktop entries:
 
@@ -107,7 +107,7 @@ Most desktop environments will prompt you to “Trust” newly copied `.desktop`
 
 ### Remote/SSH access & vLLM option
 
-- For the FP4 Qwen3 Coder 30B stack served via vLLM, follow `docs/vllm-code-completion.md`. It adds a second Docker Compose stack that serves an OpenAI-compatible endpoint on port 8004 using `bin/local-vllm`.
+- For the FP8 Qwen3 Coder 30B stack served via vLLM, follow `docs/vllm-code-completion.md` (local) or `docs/vast-ai.md` (cloud). Both serve an OpenAI-compatible endpoint on port 8004 using `bin/local-vllm`.
 - Keep the GPU box on, run `bin/local-vllm start`, and SSH-tunnel (`ssh -L 8004:localhost:8004 gpu-box`) to reuse the model from any machine/IDE without exposing it publicly.
 
 Environment variables:
