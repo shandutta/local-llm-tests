@@ -18,7 +18,17 @@
 #   MAX_NUM_SEQS    – Default 384
 set -euo pipefail
 
+# Ensure Hugging Face CLI lives on PATH even if pip installs to /usr/local/bin
+export PATH="${PATH}:/usr/local/bin"
+
 if [[ $EUID -ne 0 ]]; then
+  if command -v sudo >/dev/null 2>&1; then
+    exec sudo env "PATH=$PATH" "HF_TOKEN=${HF_TOKEN:-}" "VLLM_API_KEY=${VLLM_API_KEY:-}" \
+      "MODEL_REPO=${MODEL_REPO:-}" "MODEL_SUBDIR=${MODEL_SUBDIR:-}" \
+      "HOST_MODELS_DIR=${HOST_MODELS_DIR:-}" "TP_SIZE=${TP_SIZE:-}" \
+      "MAX_MODEL_LEN=${MAX_MODEL_LEN:-}" "MAX_NUM_SEQS=${MAX_NUM_SEQS:-}" \
+      "$0" "$@"
+  fi
   echo "[bootstrap] Run this script as root (or with sudo)." >&2
   exit 1
 fi
