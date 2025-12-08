@@ -1,0 +1,14 @@
+{
+  "github.copilot.chat.customOAIModels": {
+    "gpt-oss-120b": {
+      "name": "GPT-OSS 120B",
+      "url": "http://localhost:8002/v1",
+      "toolCalling": true,
+      "vision": false,
+      "thinking": false,
+      "maxInputTokens": 110000,
+      "maxOutputTokens": 10000,
+      "requiresAPIKey": true
+    }
+  }
+}

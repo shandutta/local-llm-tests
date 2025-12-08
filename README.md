@@ -7,7 +7,7 @@ Local LLM Tests is a working log and automation hub for my RTX 5090 based llama.
 - **Host**: AMD Ryzen 9950X3D, 96 GB DDR5 (72 GB allocated to WSL2), Ubuntu 22.04 on WSL2.
 - **GPU**: NVIDIA RTX 5090 (32 GB VRAM) – CUDA 13 toolchain installed, llama.cpp built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="89"` (sm_89).
 - **Inference stack**: `/home/shan/llama.cpp` build at version `7315 (4d3726278)` running `llama-server` (CUDA 13, host g++-12).
-- **Capabilities**: Qwen3 Coder supports OpenAI-style tool calling when served via this build.
+- **Capabilities**: Qwen3 Coder and GPT-OSS-120B both emit OpenAI-style `tool_calls` when started via the current scripts (Jinja + ChatML enabled). Vision/Thinking stay off.
 - **Models on disk/configured**:
   - GPT-OSS-120B F16 (`~/models/gpt-oss-120b/gpt-oss-120b-F16.gguf`, ~61 GB) – premium reasoning, tuned with `--n-cpu-moe 25` for ~21.6 tok/s.
   - Qwen3-Coder-30B-A3B-Instruct Q4_K_M (`~/models/Qwen3-Coder-30B-A3B-Instruct/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf`, ~18 GB) – fast coding assistant at ~39 tok/s.
