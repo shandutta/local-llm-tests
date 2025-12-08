@@ -11,26 +11,8 @@
       "port": 8002,
       "arguments": [
         "--alias", "gpt-oss-120b",
-        "--n-gpu-layers", "99",
-        "--n-cpu-moe", "25",
-        "--ctx-size", "131072",
-        "--threads", "14",
-        "--threads-batch", "16",
-        "--temp", "1.0",
-        "--top-p", "1.0",
-        "--top-k", "0",
-        "--min-p", "0.0",
-        "--parallel", "4",
-        "--cont-batching",
-        "--flash-attn", "on"
-      ]
-    },
-    "gpt-oss-120b-uncensored": {
-      "description": "GPT-OSS-120B Uncensored (Bartowski MXFP4_MOE GGUF shard).",
-      "relative_path": "gpt-oss-120b-uncensored/huizimao_gpt-oss-120b-uncensored-bf16-MXFP4_MOE/huizimao_gpt-oss-120b-uncensored-bf16-MXFP4_MOE-00001-of-00002.gguf",
-      "port": 8005,
-      "arguments": [
-        "--alias", "gpt-oss-120b-uncensored",
+        "--jinja",
+        "--chat-template", "chatml",
         "--n-gpu-layers", "99",
         "--n-cpu-moe", "25",
         "--ctx-size", "131072",
@@ -47,11 +29,13 @@
     },
     "qwen3-coder": {
       "description": "Qwen3-Coder-30B Q4_K_M for fast coding assistance.",
-      "relative_path": "qwen3-coder-32b/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+      "relative_path": "Qwen3-Coder-30B-A3B-Instruct/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
       "port": 8001,
       "arguments": [
         "--alias", "qwen3-coder",
         "--n-gpu-layers", "999",
+        "--jinja",
+        "--chat-template", "chatml",
         "--ctx-size", "32768",
         "--threads", "14",
         "--threads-batch", "16",

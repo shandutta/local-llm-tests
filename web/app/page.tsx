@@ -49,7 +49,7 @@ const fetcher = async (path: string) => {
 const MATH_MACRO_PATTERN =
   /\\(alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|omicron|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|frac|tfrac|sqrt|sum|prod|int|oint|log|ln|sin|cos|tan|csc|sec|cot|Re|Im|text|mathrm|mathbf|mathbb|mathcal|operatorname|partial|nabla|infty|cdot|pm|leq|geq|neq|approx|sim)/i;
 
-const GPT_OSS_MODELS = new Set(["gpt-oss-120b", "gpt-oss-120b-uncensored"]);
+const GPT_OSS_MODELS = new Set(["gpt-oss-120b"]);
 
 const isGptOssModel = (model: string | null) =>
   model ? GPT_OSS_MODELS.has(model.toLowerCase()) : false;

@@ -1,10 +1,13 @@
 #!/bin/bash
 
 MODEL_PATH=~/models/gpt-oss-120b/gpt-oss-120b-F16.gguf
+LLAMA_SERVER_BIN=${LLAMA_SERVER_BIN:-"$HOME/llama.cpp/build-gcc12/bin/llama-server"}
 
-./build/bin/llama-server \
+"$LLAMA_SERVER_BIN" \
   --model "$MODEL_PATH" \
   --alias "gpt-oss-120b" \
+  --jinja \
+  --chat-template "chatml" \
   --n-gpu-layers 99 \
   --n-cpu-moe 25 \
   --ctx-size 131072 \

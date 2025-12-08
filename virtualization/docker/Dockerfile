@@ -11,7 +11,7 @@ RUN ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/lib/x86_64-linux-gnu/libc
     ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/lib/x86_64-linux-gnu/libcuda.so.1
 RUN git clone --depth=1 --branch "$LLAMA_CPP_REF" "$LLAMA_CPP_REPO" llama.cpp
 WORKDIR /opt/llama.cpp
-RUN cmake -S . -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 && \
+RUN cmake -S . -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DLLAMA_JINJA=ON && \
     cmake --build build -j$(nproc)
 RUN cmake --install build --prefix /opt/llama-install
 

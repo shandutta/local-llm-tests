@@ -5,12 +5,12 @@ Local LLM Tests is a working log and automation hub for my RTX 5090 based llama.
 ## Current Environment Snapshot
 
 - **Host**: AMD Ryzen 9950X3D, 96 GB DDR5 (72 GB allocated to WSL2), Ubuntu 22.04 on WSL2.
-- **GPU**: NVIDIA RTX 5090 (32 GB VRAM) – CUDA 12.6 installed, llama.cpp built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=\"89\"`.
-- **Inference stack**: `/home/shan/llama.cpp` build at version `7045 (97d511721)` running `llama-server`.
+- **GPU**: NVIDIA RTX 5090 (32 GB VRAM) – CUDA 13 toolchain installed, llama.cpp built with `-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="89"` (sm_89).
+- **Inference stack**: `/home/shan/llama.cpp` build at version `7315 (4d3726278)` running `llama-server` (CUDA 13, host g++-12).
+- **Capabilities**: Qwen3 Coder supports OpenAI-style tool calling when served via this build.
 - **Models on disk/configured**:
   - GPT-OSS-120B F16 (`~/models/gpt-oss-120b/gpt-oss-120b-F16.gguf`, ~61 GB) – premium reasoning, tuned with `--n-cpu-moe 25` for ~21.6 tok/s.
-  - GPT-OSS-120B Uncensored MXFP4_MOE (`~/models/gpt-oss-120b-uncensored/huizimao_gpt-oss-120b-uncensored-bf16-MXFP4_MOE/huizimao_gpt-oss-120b-uncensored-bf16-MXFP4_MOE-00001-of-00002.gguf`, ~63 GB across two shards; download before first use) – uncensored variant served on port 8005.
-  - Qwen3-Coder-30B-A3B-Instruct Q4_K_M (`~/models/qwen3-coder-32b/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf`, ~18 GB) – fast coding assistant at ~39 tok/s.
+  - Qwen3-Coder-30B-A3B-Instruct Q4_K_M (`~/models/Qwen3-Coder-30B-A3B-Instruct/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf`, ~18 GB) – fast coding assistant at ~39 tok/s.
 
 Scripts already exist inside llama.cpp for quickly starting each model:
 
@@ -21,20 +21,6 @@ cd /home/shan/llama.cpp
 ```
 
 The optional `gpt-oss-proxy.py` (Flask) can strip channel tags and relay port 8003 → 8002.
-
-### Downloading GPT-OSS-120B Uncensored (Bartowski MXFP4_MOE)
-
-The manifest points to the MXFP4_MOE shard pair at `~/models/gpt-oss-120b-uncensored/huizimao_gpt-oss-120b-uncensored-bf16-MXFP4_MOE/huizimao_gpt-oss-120b-uncensored-bf16-MXFP4_MOE-00001-of-00002.gguf` (with the second shard beside it). Download it with `huggingface-cli` (hf-transfer optional for speed):
-
-```bash
-pip install -U "huggingface_hub[cli]" hf-transfer
-export HF_HUB_ENABLE_HF_TRANSFER=1
-huggingface-cli download bartowski/huizimao_gpt-oss-120b-uncensored-bf16-GGUF \
-  --include "huizimao_gpt-oss-120b-uncensored-bf16-MXFP4_MOE/*" \
-  --local-dir ~/models/gpt-oss-120b-uncensored
-```
-
-Start it via Docker with `bin/local-llm start gpt-oss-120b-uncensored` (llama.cpp listens on port 8005), or pass `--model gpt-oss-120b-uncensored` to the launcher.
 
 ## Repository Purpose
 
@@ -71,8 +57,6 @@ Usage (once Docker Desktop + nvidia-container-toolkit are configured inside WSL2
 
 # Start exactly one model (writes virtualization/docker/.env.runtime and runs docker compose up -d --build)
 ./bin/local-llm start gpt-oss-120b
-# Start the uncensored GPT-OSS variant (MXFP4_MOE shards, port 8005)
-./bin/local-llm start gpt-oss-120b-uncensored
 
 # Show status or stop the running container
 ./bin/local-llm status
@@ -147,20 +131,20 @@ All model-specific llama-server flags remain inside `config/models.yaml`, so swa
 1. Open a terminal in `/home/shan/local-llm-tests`.
 2. Start everything (model + API + web UI) with the launcher:  
    `bin/local-llm-launcher.sh start --model gpt-oss-120b`  
-   - Use `--model gpt-oss-120b-uncensored` after downloading the MXFP4_MOE shards, or `--model qwen3-coder` to switch to coding mode.
-   - The API listens on `8008`, the web UI on `3000`, and the model on its configured port (8002 for GPT-OSS, 8005 for the uncensored variant, 8001 for Qwen).
+   - Use `--model qwen3-coder` to switch to coding mode.
+   - The API listens on `8008`, the web UI on `3000`, and the model on its configured port (8002 for GPT-OSS, 8001 for Qwen).
 3. Stop the stack when you are done:  
    `bin/local-llm-launcher.sh stop`
 
 If you only want the model container (no API/UI):
 - `bin/local-llm list` – see available models.
 - `bin/local-llm start gpt-oss-120b` – start one model via Docker Compose.
-- `bin/local-llm start gpt-oss-120b-uncensored` – uncensored variant on port 8005.
 - `bin/local-llm stop` – stop it.
 
 If you want to run llama.cpp directly on the host (no Docker):
 - `./start_gpt_oss.sh` (serves GPT-OSS on port 8002)
 - `./start_qwen_coder.sh` (serves Qwen on port 8001)
+  - These scripts default to `~/llama.cpp/build-gcc12/bin/llama-server` (CUDA 13, sm_89). Override with `LLAMA_SERVER_BIN=/path/to/llama-server` if you rebuild elsewhere. A symlink `./build -> ~/llama.cpp/build-gcc12` is present so older paths still resolve.
 
 vLLM option for the FP8 Qwen checkpoint (OpenAI-compatible on port 8004):
 - `bin/local-vllm start` to bring up vLLM with the settings in `virtualization/vllm/.env.vllm`.
@@ -171,7 +155,6 @@ vLLM option for the FP8 Qwen checkpoint (OpenAI-compatible on port 8004):
 The llama.cpp endpoints are OpenAI-compatible, so point VS Code’s agent to the right base URL:
 
 - GPT-OSS (llama.cpp): `http://localhost:8002/v1`, model name `gpt-oss-120b`
-- GPT-OSS Uncensored (llama.cpp): `http://localhost:8005/v1`, model name `gpt-oss-120b-uncensored`
 - Qwen (llama.cpp): `http://localhost:8001/v1`, model name `qwen3-coder`
 - vLLM FP8 Qwen: `http://localhost:8004/v1`, model name `qwen3-coder-30b-a3b-fp8` (or whatever you set)
 

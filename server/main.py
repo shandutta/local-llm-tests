@@ -26,7 +26,7 @@ CLI_PATH = REPO_ROOT / 'bin' / 'local-llm'
 COMPOSE_FILE = REPO_ROOT / 'virtualization' / 'docker' / 'docker-compose.yaml'
 ENV_FILE = REPO_ROOT / 'virtualization' / 'docker' / '.env.runtime'
 
-HARMONY_MODELS = {'gpt-oss-120b', 'gpt-oss-120b-uncensored'}
+HARMONY_MODELS = {'gpt-oss-120b'}
 CUSTOM_HARMONY_PROMPT = os.environ.get('HARMONY_SYSTEM_PROMPT')
 
 app = FastAPI(title='Local LLM Orchestrator', version='0.2.0')
@@ -313,7 +313,7 @@ MCP_TOOLS = [
         input_schema={
             "type": "object",
             "properties": {
-                "model": {"type": "string", "description": "Model name to start (e.g., 'gpt-oss-120b', 'gpt-oss-120b-uncensored', 'qwen3-coder')"}
+                "model": {"type": "string", "description": "Model name to start (e.g., 'gpt-oss-120b', 'qwen3-coder')"}
             },
             "required": ["model"]
         }

@@ -1,10 +1,13 @@
 #!/bin/bash
 
-MODEL_PATH=~/models/qwen3-coder-32b/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
+MODEL_PATH=~/models/Qwen3-Coder-30B-A3B-Instruct/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
+LLAMA_SERVER_BIN=${LLAMA_SERVER_BIN:-"$HOME/llama.cpp/build-gcc12/bin/llama-server"}
 
-./build/bin/llama-server \
+"$LLAMA_SERVER_BIN" \
   --model "$MODEL_PATH" \
   --alias "qwen3-coder" \
+  --jinja \
+  --chat-template "chatml" \
   --n-gpu-layers 999 \
   --ctx-size 32768 \
   --threads 14 \

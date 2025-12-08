@@ -95,6 +95,8 @@ def generate_env(model_name: str, spec: dict, defaults: dict):
 def start_model(model_name: str, defaults: dict, models: dict):
     if model_name not in models:
         sys.exit(f"unknown model '{model_name}'. Run 'local-llm list'.")
+    # stop any existing model first so we only run one at a time
+    stop_model()
     env_values = generate_env(model_name, models[model_name], defaults)
     write_env(env_values)
     cmd = compose_cmd(False, "up", "-d", "--build")
@@ -103,6 +105,9 @@ def start_model(model_name: str, defaults: dict, models: dict):
 
 
 def stop_model():
+    if not ENV_FILE.exists():
+        # nothing to stop
+        return
     cmd = compose_cmd(True, "down")
     print("+", " ".join(cmd))
     subprocess.run(cmd, check=True)
