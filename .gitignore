@@ -7,3 +7,4 @@ virtualization/docker/.env.runtime
 __pycache__/
 .virtualenv/
 .DS_Store
+.venv/

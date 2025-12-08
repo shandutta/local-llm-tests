@@ -49,6 +49,25 @@ const fetcher = async (path: string) => {
 const MATH_MACRO_PATTERN =
   /\\(alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|omicron|pi|rho|sigma|tau|upsilon|phi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|frac|tfrac|sqrt|sum|prod|int|oint|log|ln|sin|cos|tan|csc|sec|cot|Re|Im|text|mathrm|mathbf|mathbb|mathcal|operatorname|partial|nabla|infty|cdot|pm|leq|geq|neq|approx|sim)/i;
 
+const GPT_OSS_MODELS = new Set(["gpt-oss-120b", "gpt-oss-120b-uncensored"]);
+
+const isGptOssModel = (model: string | null) =>
+  model ? GPT_OSS_MODELS.has(model.toLowerCase()) : false;
+
+const cleanGptOssText = (input: string) => {
+  if (!input) return input;
+  const finalMatch = input.match(
+    /<\|channel\|>final(?:<\|message\|>)?([\s\S]*?)(?:<\|end\|>|$)/i,
+  );
+  if (finalMatch?.[1]) return finalMatch[1].trim();
+  return input
+    .replace(/<\|start\|>.*?(?=<\|channel\|>final)/gis, " ")
+    .replace(/<\|start\|>|<\|end\|>|<\|message\|>/gi, " ")
+    .replace(/<\|channel\|>[a-zA-Z0-9_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
 const normalizeMathDelimiters = (text: string) => {
   if (!text) return text;
   const convertSegment = (
@@ -96,8 +115,7 @@ export default function Home() {
   const [isStreaming, setIsStreaming] = useState(false);
 
   const isModelReady = selectedModel && selectedModel === activeModelName;
-  const supportsReasoningEffort =
-    selectedModel && selectedModel.toLowerCase() === "gpt-oss-120b";
+  const supportsReasoningEffort = isGptOssModel(selectedModel);
 
   useEffect(() => {
     if (!selectedModel && manifest) {
@@ -114,7 +132,7 @@ export default function Home() {
       const matched = status.containers?.some((container) => {
         const state = container.state?.toLowerCase() ?? "";
         return (
-          container.name?.includes(expectedName) &&
+          container.name === expectedName &&
           (state.includes("up") || state.includes("running"))
         );
       });
@@ -172,12 +190,14 @@ export default function Home() {
 
   const parseGptOssContent = (content: string) => {
     const analysisMatch = content.match(
-      /<\|channel\|>analysis([\s\S]*?)<\|end\|>/,
+      /<\|channel\|>analysis(?:<\|message\|>)?([\s\S]*?)(?:<\|end\|>|$)/i,
     );
-    const finalMatch = content.match(/<\|channel\|>final([\s\S]*)$/i);
+    const finalMatch = content.match(
+      /<\|channel\|>final(?:<\|message\|>)?([\s\S]*?)(?:<\|end\|>|$)/i,
+    );
     return {
       analysis: analysisMatch?.[1]?.trim(),
-      final: finalMatch?.[1]?.trim() ?? content,
+      final: finalMatch?.[1]?.trim() ?? cleanGptOssText(content),
     };
   };
 
@@ -507,11 +527,11 @@ export default function Home() {
                 {messages.map((msg, idx) => {
                   const prettyRole =
                     msg.role.charAt(0).toUpperCase() + msg.role.slice(1);
-                  const { analysis, final } = msg.content.includes(
-                    "<|channel|>analysis",
-                  )
-                    ? parseGptOssContent(msg.content)
-                    : { analysis: undefined, final: msg.content };
+                  const isGptOss = isGptOssModel(selectedModel);
+                  const { analysis, final } =
+                    isGptOss && msg.content.includes("<|channel|>")
+                      ? parseGptOssContent(msg.content)
+                      : { analysis: undefined, final: msg.content };
                   return (
                     <div key={`${msg.role}-${idx}`} className="text-sm leading-6">
                       <p className="font-semibold text-zinc-700">{prettyRole}</p>
@@ -549,7 +569,11 @@ export default function Home() {
                         remarkPlugins={[remarkGfm, remarkMath]}
                         rehypePlugins={[rehypeKatex]}
                       >
-                        {normalizeMathDelimiters(streamingReply)}
+                        {normalizeMathDelimiters(
+                          isGptOssModel(selectedModel)
+                            ? cleanGptOssText(streamingReply)
+                            : streamingReply,
+                        )}
                       </ReactMarkdown>
                     </div>
                   </div>

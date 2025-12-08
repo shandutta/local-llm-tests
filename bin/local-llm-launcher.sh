@@ -19,6 +19,7 @@ SERVER_PID="$STATE_DIR/server.pid"
 WEB_PID="$STATE_DIR/web.pid"
 SERVER_LOG="$STATE_DIR/server.log"
 WEB_LOG="$STATE_DIR/web.log"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 FASTAPI_HOST="${FASTAPI_HOST:-0.0.0.0}"
 FASTAPI_PORT="${FASTAPI_PORT:-8008}"
 DEFAULT_MODEL="${LOCAL_LLM_DEFAULT_MODEL:-gpt-oss-120b}"
@@ -54,6 +55,23 @@ stop_pid() {
   rm -f "$pid_file"
 }
 
+kill_port_listeners() {
+  local port=$1
+  local label=$2
+  local pids=()
+  if command -v lsof >/dev/null 2>&1; then
+    mapfile -t pids < <(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+  else
+    mapfile -t pids < <(ss -ltnp 2>/dev/null | awk -v p=":$port" '$4 ~ p {split($7,a,","); for (i in a) if (a[i] ~ /pid=/) {sub(/pid=/,"",a[i]); print a[i]}}')
+  fi
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      log "Killing existing $label listener on port $port (pid $pid)..."
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
 ensure_frontend_dependencies() {
   if [[ ! -d "$WEB_DIR/node_modules" ]]; then
     log "Installing frontend dependencies..."
@@ -78,11 +96,12 @@ start_fastapi() {
 
 start_frontend() {
   ensure_frontend_dependencies
+  kill_port_listeners "$FRONTEND_PORT" "frontend"
   if is_pid_running "$WEB_PID"; then
     log "Frontend already running (pid $(cat "$WEB_PID"))."
     return
   fi
-  log "Starting Next.js frontend on http://localhost:3000 ..."
+  log "Starting Next.js frontend on http://localhost:${FRONTEND_PORT} ..."
   (
     cd "$WEB_DIR"
     nohup npm run dev:frontend >>"$WEB_LOG" 2>&1 &
@@ -93,6 +112,7 @@ start_frontend() {
 
 stop_frontend() {
   stop_pid "$WEB_PID" "frontend"
+  kill_port_listeners "$FRONTEND_PORT" "frontend"
 }
 
 stop_fastapi() {

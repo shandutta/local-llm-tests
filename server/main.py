@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Literal
@@ -25,7 +26,8 @@ CLI_PATH = REPO_ROOT / 'bin' / 'local-llm'
 COMPOSE_FILE = REPO_ROOT / 'virtualization' / 'docker' / 'docker-compose.yaml'
 ENV_FILE = REPO_ROOT / 'virtualization' / 'docker' / '.env.runtime'
 
-HARMONY_MODELS = {'gpt-oss-120b'}
+HARMONY_MODELS = {'gpt-oss-120b', 'gpt-oss-120b-uncensored'}
+CUSTOM_HARMONY_PROMPT = os.environ.get('HARMONY_SYSTEM_PROMPT')
 
 app = FastAPI(title='Local LLM Orchestrator', version='0.2.0')
 app.add_middleware(
@@ -75,6 +77,18 @@ def encode_harmony_prompt(messages: List[Dict[str, Any]], reasoning_effort: str)
     Use Unsloth's Harmony helper when available, otherwise fall back to a
     lightweight ChatML-style template so GPT-OSS still receives a structured prompt.
     """
+    if CUSTOM_HARMONY_PROMPT:
+        system_text = CUSTOM_HARMONY_PROMPT.format(reasoning_effort=reasoning_effort)
+        lines = ["<|start|>system", system_text, "<|end|>"]
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            lines.append(f"<|start|>{role}")
+            lines.append(content)
+            lines.append("<|end|>")
+        lines.append("<|start|>assistant")
+        return "\n".join(lines)
+
     if _encode_harmony is not None:
         return _encode_harmony(
             messages=messages,
@@ -192,13 +206,28 @@ def status() -> StatusResponse:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
+        
+        # Extract published ports from Publishers array
+        published_ports = []
+        publishers = payload.get('Publishers', [])
+        if publishers:
+            for publisher in publishers:
+                if publisher.get('PublishedPort'):
+                    published_ports.append(f"{publisher.get('URL', '0.0.0.0')}:{publisher['PublishedPort']}-{publisher.get('TargetPort', 0)}/tcp")
+        
+        # Also check the Ports field as fallback
+        if not published_ports and payload.get('Ports'):
+            ports_str = payload.get('Ports', '')
+            if ports_str and ports_str != '':
+                published_ports.append(ports_str)
+        
         containers.append(
             ContainerStatus(
                 name=payload.get('Name'),
                 service=payload.get('Service'),
                 state=payload.get('State'),
                 health=payload.get('Health'),
-                published_ports=[payload.get('PublishedPort')] if payload.get('PublishedPort') else None,
+                published_ports=published_ports if published_ports else None,
             )
         )
 
@@ -253,6 +282,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         try:
             async for chunk in response.aiter_bytes():
                 yield chunk
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n".encode()
         finally:
             await stream_ctx.__aexit__(None, None, None)
             await client.aclose()
@@ -260,8 +291,333 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     return StreamingResponse(stream_llama(), media_type='text/event-stream')
 
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 8008))
-    import uvicorn
+# MCP (Model Context Protocol) Integration for VS Code Agent Chat
+from typing import Dict, Any, List
+import json as json_lib
 
-    uvicorn.run('server.main:app', host='0.0.0.0', port=port, reload=True)
+class MCPTool:
+    def __init__(self, name: str, description: str, input_schema: Dict[str, Any]):
+        self.name = name
+        self.description = description
+        self.input_schema = input_schema
+
+MCP_TOOLS = [
+    MCPTool(
+        name="list_models",
+        description="List all available local LLM models",
+        input_schema={"type": "object", "properties": {}}
+    ),
+    MCPTool(
+        name="start_model",
+        description="Start a specific local LLM model",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "model": {"type": "string", "description": "Model name to start (e.g., 'gpt-oss-120b', 'gpt-oss-120b-uncensored', 'qwen3-coder')"}
+            },
+            "required": ["model"]
+        }
+    ),
+    MCPTool(
+        name="stop_model",
+        description="Stop the currently running local LLM model",
+        input_schema={"type": "object", "properties": {}}
+    ),
+    MCPTool(
+        name="get_status",
+        description="Get the status of the local LLM orchestration",
+        input_schema={"type": "object", "properties": {}}
+    ),
+    MCPTool(
+        name="chat",
+        description="Send a chat message to the currently running local LLM model",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "messages": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "role": {"type": "string", "enum": ["user", "assistant", "system"]},
+                            "content": {"type": "string"}
+                        },
+                        "required": ["role", "content"]
+                    }
+                },
+                "reasoning_effort": {"type": "string", "enum": ["low", "medium", "high"], "default": "medium"}
+            },
+            "required": ["messages"]
+        }
+    )
+]
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    MCP (Model Context Protocol) endpoint for VS Code Agent Chat integration.
+    Handles JSON-RPC 2.0 requests.
+    """
+    try:
+        method = request.get("method")
+        params = request.get("params", {})
+        req_id = request.get("id")
+
+        if method == "initialize":
+            # Required MCP handshake so the client knows what capabilities are available
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "serverInfo": {"name": "local-llm-orchestrator", "version": "0.2.0"},
+                    "capabilities": {
+                        "tools": {},  # We only expose tools in this server
+                    },
+                },
+            }
+
+        if method == "tools/list":
+            # Return list of available tools
+            tools = []
+            for tool in MCP_TOOLS:
+                tools.append({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema
+                })
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"tools": tools}
+            }
+
+        elif method == "tools/call":
+            tool_name = params.get("name")
+            tool_args = params.get("arguments", {})
+
+            # Find the tool
+            tool = next((t for t in MCP_TOOLS if t.name == tool_name), None)
+            if not tool:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32601, "message": f"Tool '{tool_name}' not found"}
+                }
+
+            # Execute the tool
+            try:
+                result = await execute_mcp_tool(tool_name, tool_args)
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": result
+                }
+            except Exception as e:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32000, "message": str(e)}
+                }
+
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": f"Method '{method}' not supported"}
+            }
+
+    except Exception as e:
+        return {
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
+        }
+
+async def execute_mcp_tool(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute an MCP tool and return the result."""
+    if tool_name == "list_models":
+        manifest = _load_manifest()
+        models = manifest.get('models', {})
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Available models: {', '.join(models.keys())}\n\n" +
+                           "\n".join([f"- {name}: {spec.get('description', 'No description')}" for name, spec in models.items()])
+                }
+            ]
+        }
+
+    elif tool_name == "start_model":
+        model = args.get("model")
+        if not model:
+            raise ValueError("Model name is required")
+
+        # Stop current model first
+        try:
+            _run_cli(['stop'])
+        except:
+            pass  # Ignore errors if no model is running
+
+        # Start the requested model
+        result = _run_cli(['start', model])
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Started model '{model}'. Status: {result.stdout.strip()}"
+                }
+            ]
+        }
+
+    elif tool_name == "stop_model":
+        result = _run_cli(['stop'])
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Stopped model. Status: {result.stdout.strip()}"
+                }
+            ]
+        }
+
+    elif tool_name == "get_status":
+        status_response = status()
+        containers = status_response.containers
+        if containers:
+            container = containers[0]
+            text = f"Status: {container.state or 'Unknown'}"
+            if container.published_ports:
+                text += f" | Ports: {', '.join(container.published_ports)}"
+            if container.name:
+                text += f" | Container: {container.name}"
+            if container.service:
+                text += f" | Service: {container.service}"
+        else:
+            text = "No containers running"
+
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": text
+                }
+            ]
+        }
+
+    elif tool_name == "chat":
+        messages = args.get("messages", [])
+        reasoning_effort = args.get("reasoning_effort", "medium")
+
+        if not messages:
+            raise ValueError("Messages are required")
+
+        # Check if a model is running
+        status_response = status()
+        containers = status_response.containers
+        print(f"[mcp.chat] containers={[(c.name, c.state, c.published_ports) for c in containers]}")
+        if not containers or not any(c.state == "running" for c in containers):
+            raise ValueError("No model is currently running. Use start_model first.")
+
+        # Get the running container to determine the port
+        running_container = next((c for c in containers if c.state == "running"), None)
+        if not running_container or not running_container.published_ports:
+            raise ValueError("Cannot determine model port")
+
+        # Extract port from published_ports (format: "0.0.0.0:8001-8001/tcp" or ":::8001-8001/tcp")
+        port_match = None
+        for port_str in running_container.published_ports:
+            # Try different patterns to extract the port
+            match = re.search(r':(\d+)(?:->|-)\d*/tcp', port_str)
+            print(f"[mcp.chat] inspect port='{port_str}' match={match.group(1) if match else None}")
+            if match:
+                port_match = match.group(1)
+                break
+
+        if not port_match:
+            raise ValueError("Cannot determine model port from container")
+
+        port = int(port_match)
+        base_url = f"http://localhost:{port}"
+
+        # Determine if this is GPT-OSS model for special handling
+        is_gpt_oss = any("gpt-oss" in (c.name or "") for c in containers if c.state == "running")
+
+        # Prepare the request
+        chat_request = ChatRequest(
+            model="current-model",  # Will be overridden by the actual model
+            messages=[ChatMessage(**msg) for msg in messages],
+            reasoning_effort=reasoning_effort
+        )
+
+        # Make the request to llama-server
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            endpoint = f"{base_url}/v1/chat/completions"
+            request_data = {
+                "model": "local-model",
+                "messages": [{"role": msg.role, "content": msg.content} for msg in chat_request.messages],
+                "stream": False  # MCP doesn't handle streaming well
+            }
+
+            if is_gpt_oss:
+                # Apply Harmony encoding for GPT-OSS
+                harmony_prompt = encode_harmony_prompt(
+                    [{"role": msg.role, "content": msg.content} for msg in chat_request.messages],
+                    reasoning_effort
+                )
+                endpoint = f"{base_url}/completion"
+                request_data = {
+                    "model": "local-model",
+                    "prompt": harmony_prompt,
+                    "stream": False
+                }
+
+            print(f"[mcp.chat] POST {endpoint} payload_keys={list(request_data.keys())}")
+            response = await client.post(endpoint, json=request_data)
+
+            if response.status_code != 200:
+                raise ValueError(f"Model request failed ({response.status_code}): {response.text}")
+
+            result = response.json()
+            content = ""
+
+            if "choices" in result and result["choices"]:
+                choice = result["choices"][0]
+                if "message" in choice and "content" in choice["message"]:
+                    content = choice["message"]["content"]
+                elif "text" in choice:
+                    content = choice["text"]
+
+            # Clean GPT-OSS response if needed
+            if is_gpt_oss:
+                content = clean_gpt_oss_text(content)
+
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": content
+                    }
+                ]
+            }
+
+    else:
+        raise ValueError(f"Unknown tool: {tool_name}")
+
+def clean_gpt_oss_text(text: str) -> str:
+    """Clean GPT-OSS channel tags from response text."""
+    if not text:
+        return text
+
+    # Extract final channel content
+    final_match = re.search(r'<\|channel\|>final(?:<\|message\|>)?([\s\S]*?)(?:<\|end\|>|$)', text, re.IGNORECASE)
+    if final_match:
+        return final_match.group(1).strip()
+
+    # Fallback: remove channel tags
+    text = re.sub(r'<\|channel\|>analysis<\|message\|>.*?<\|end\|>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<\|start\|>assistant<\|channel\|>final<\|message\|>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<\|channel\|>final<\|message\|>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<\|end\|>', '', text, flags=re.IGNORECASE)
+    return text.strip()
