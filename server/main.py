@@ -4,15 +4,18 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Literal
+from urllib.parse import urlparse
 
 import httpx
 import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from huggingface_hub import HfApi, hf_hub_download, hf_hub_url
 from pydantic import BaseModel
 
 try:
@@ -72,6 +75,26 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     reasoning_effort: Literal['low', 'medium', 'high'] = 'medium'
 
+
+class RegisterModelRequest(BaseModel):
+    source: str
+    name: str | None = None
+    description: str | None = None
+    port: int | None = None
+    arguments: List[str] | None = None
+
+
+REGISTER_PROGRESS: Dict[str, Any] = {
+    "status": "idle",
+    "message": None,
+    "downloaded_bytes": 0,
+    "total_bytes": 0,
+    "file": None,
+    "model": None,
+    "path": None,
+}
+
+
 def encode_harmony_prompt(messages: List[Dict[str, Any]], reasoning_effort: str) -> str:
     """
     Use Unsloth's Harmony helper when available, otherwise fall back to a
@@ -122,6 +145,108 @@ def _load_manifest() -> Dict[str, Any]:
     return data
 
 
+def _save_manifest(manifest: Dict[str, Any]) -> None:
+    """Persist the manifest as JSON (compatible with the CLI reader)."""
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2))
+
+
+def _models_root(defaults: Dict[str, Any]) -> Path:
+    host_dir = os.environ.get('LOCAL_LLM_MODELS_DIR') or defaults.get('host_models_dir')
+    if not host_dir:
+        raise HTTPException(status_code=500, detail='Host models directory is not configured')
+    root = Path(host_dir).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _is_port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return sock.connect_ex(('127.0.0.1', port)) != 0
+
+
+def _next_available_port(manifest: Dict[str, Any], start: int = 8001) -> int:
+    used = {
+        int(spec.get('port'))
+        for spec in manifest.get('models', {}).values()
+        if spec.get('port') is not None
+    }
+    port = max(start, max(used) + 1 if used else start)
+    while port in used or not _is_port_free(port):
+        port += 1
+    return port
+
+
+def _sanitize_name(value: str) -> str:
+    slug = re.sub(r'[^a-zA-Z0-9-]+', '-', value).strip('-').lower()
+    return slug or 'model'
+
+
+def _reset_progress():
+    REGISTER_PROGRESS.update(
+        status="idle",
+        message=None,
+        downloaded_bytes=0,
+        total_bytes=0,
+        file=None,
+        model=None,
+        path=None,
+    )
+
+
+def _set_progress(**kwargs):
+    REGISTER_PROGRESS.update(**kwargs)
+
+
+def _parse_huggingface_source(source: str) -> tuple[str, str | None, str]:
+    """
+    Return (repo_id, filename, revision) for Hugging Face URLs or hf:// links.
+    Accepted:
+      - https://huggingface.co/org/repo/resolve/main/path/to/file.gguf
+      - https://huggingface.co/org/repo/blob/v1.0/model.gguf
+      - https://huggingface.co/org/repo (repo root; filename picked automatically)
+      - hf://org/repo/path/to/file.gguf  (revision defaults to main)
+    """
+    if not source:
+        raise HTTPException(status_code=400, detail='Model source is required')
+
+    parsed = urlparse(source)
+    path_parts = [part for part in parsed.path.split('/') if part]
+
+    if parsed.scheme == 'hf':
+        # netloc contains the org; path contains the remainder
+        if not parsed.netloc or not path_parts:
+            raise HTTPException(status_code=400, detail='hf:// links must look like hf://org/repo[/file.gguf]')
+        repo_id = f"{parsed.netloc}/{path_parts[0]}"
+        filename = '/'.join(path_parts[1:]) if len(path_parts) > 1 else None
+        return repo_id, filename if filename else None, 'main'
+
+    if parsed.scheme in {'http', 'https'} and parsed.netloc.endswith('huggingface.co'):
+        if len(path_parts) == 2:
+            # repo root
+            repo_id = '/'.join(path_parts[:2])
+            return repo_id, None, 'main'
+        if len(path_parts) == 3:
+            # repo root + filename without revision (assume main)
+            repo_id = '/'.join(path_parts[:2])
+            filename = path_parts[2]
+            return repo_id, filename, 'main'
+        if len(path_parts) >= 4 and path_parts[2] in {'resolve', 'blob'}:
+            repo_id = '/'.join(path_parts[:2])
+            revision = path_parts[3]
+            filename_parts = path_parts[4:]
+            if not filename_parts:
+                raise HTTPException(status_code=400, detail='No filename found in Hugging Face link')
+            filename = '/'.join(filename_parts)
+            return repo_id, filename, revision
+
+    raise HTTPException(
+        status_code=400,
+        detail='Unsupported source. Provide a huggingface.co link or hf://org/repo/file.gguf',
+    )
+
+
+
 def _resolve_model(model_name: str) -> Dict[str, Any]:
     manifest = _load_manifest()
     models = manifest.get('models', {})
@@ -138,6 +263,184 @@ def health() -> Dict[str, str]:
 @app.get('/models')
 def list_models() -> Dict[str, Any]:
     return _load_manifest()
+
+
+@app.get('/models/register/status')
+def register_progress() -> Dict[str, Any]:
+    """Return the current download/register progress (best-effort)."""
+    return REGISTER_PROGRESS
+
+
+@app.post('/models/register')
+def register_model(req: RegisterModelRequest) -> Dict[str, Any]:
+    """
+    Download a GGUF file from Hugging Face and add it to the manifest so the
+    frontend can start it like any other model.
+    """
+    _reset_progress()
+    manifest = _load_manifest()
+    defaults = manifest.get('defaults', {})
+    models = manifest.setdefault('models', {})
+
+    repo_id, filename, revision = _parse_huggingface_source(req.source)
+    api = HfApi(token=os.environ.get('HF_TOKEN'))
+
+    if filename is None or not filename.lower().endswith('.gguf'):
+        # If user pasted a repo link or non-resolve URL, pick a GGUF file for them.
+        candidates = [f for f in api.list_repo_files(repo_id=repo_id, revision=revision) if f.lower().endswith('.gguf')]
+        if not candidates:
+            raise HTTPException(status_code=400, detail='No GGUF files found in that repository')
+        priority = ['Q5_1', 'Q5', 'Q4_K_M', 'Q4', 'Q8_0', 'Q8']
+        chosen = None
+        for marker in priority:
+            for candidate in candidates:
+                if marker.lower() in candidate.lower():
+                    chosen = candidate
+                    break
+            if chosen:
+                break
+        filename = chosen or sorted(candidates)[0]
+
+    if not filename.lower().endswith('.gguf'):
+        raise HTTPException(status_code=400, detail='Only GGUF files are supported right now')
+
+    base_name = _sanitize_name(req.name or Path(filename).stem)
+    candidate = base_name
+    suffix = 2
+    while candidate in models:
+        candidate = f"{base_name}-{suffix}"
+        suffix += 1
+
+    host_root = _models_root(defaults)
+    target_dir = host_root / repo_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    download_url = hf_hub_url(repo_id=repo_id, filename=filename, revision=revision)
+    temp_path = target_dir / (Path(filename).name + ".part")
+    final_path = target_dir / Path(filename).name
+
+    headers = {}
+    token = os.environ.get('HF_TOKEN')
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+
+    _set_progress(status="downloading", message="Starting download", file=filename, model=candidate, path=str(final_path))
+
+    try:
+        with httpx.Client(timeout=None, follow_redirects=True, headers=headers) as client:
+            head = client.head(download_url)
+            if head.status_code >= 400:
+                raise HTTPException(status_code=head.status_code, detail=f'Failed to access file: {head.text}')
+            total = int(head.headers.get('content-length', '0')) if head.headers.get('content-length') else 0
+            _set_progress(total_bytes=total)
+
+            with client.stream("GET", download_url) as resp:
+                if resp.status_code >= 400:
+                    raise HTTPException(status_code=resp.status_code, detail=f'Failed to download model: {resp.text}')
+                downloaded = 0
+                with temp_path.open("wb") as fout:
+                    for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        fout.write(chunk)
+                        downloaded += len(chunk)
+                        _set_progress(downloaded_bytes=downloaded, status="downloading", message="Downloading GGUF…")
+                temp_path.replace(final_path)
+    except HTTPException:
+        _set_progress(status="error", message="Download failed")
+        raise
+    except Exception as exc:
+        _set_progress(status="error", message=str(exc))
+        raise HTTPException(status_code=400, detail=f'Failed to download model: {exc}') from exc
+
+    try:
+        relative_path = str(final_path.resolve().relative_to(host_root))
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail='Downloaded file escaped models directory') from exc
+
+    used_ports = {
+        int(spec.get('port'))
+        for spec in manifest.get('models', {}).values()
+        if spec.get('port') is not None
+    }
+    if req.port:
+        if req.port in used_ports or not _is_port_free(req.port):
+            raise HTTPException(status_code=400, detail=f"Port {req.port} is already in use")
+        port = req.port
+    else:
+        port = _next_available_port(manifest)
+
+    arguments = req.arguments or [
+        "--alias", candidate,
+        "--chat-template", "chatml",
+        "--n-gpu-layers", "999",
+        "--ctx-size", "32768",
+        "--threads", "14",
+        "--threads-batch", "16",
+        "--temp", "0.7",
+        "--top-p", "0.9",
+        "--top-k", "40",
+        "--repeat-penalty", "1.05",
+        "--parallel", "1",
+        "--cont-batching",
+    ]
+
+    description = req.description or f"Imported from Hugging Face: {repo_id}/{Path(filename).name}"
+
+    _set_progress(status="registering", message="Updating manifest…")
+
+    models[candidate] = {
+        "description": description,
+        "relative_path": relative_path,
+        "port": port,
+        "arguments": arguments,
+    }
+
+    _save_manifest(manifest)
+
+    _set_progress(status="completed", message="Ready", downloaded_bytes=REGISTER_PROGRESS.get("downloaded_bytes", 0))
+
+    return {
+        "model": candidate,
+        "relative_path": relative_path,
+        "port": port,
+        "description": description,
+    }
+
+
+@app.delete('/models/{name}')
+def delete_model(name: str, delete_files: bool = False) -> Dict[str, Any]:
+    manifest = _load_manifest()
+    models = manifest.get('models', {})
+    if name not in models:
+        raise HTTPException(status_code=404, detail=f"Model '{name}' not found")
+
+    entry = models.pop(name)
+    _save_manifest(manifest)
+
+    deleted_path: str | None = None
+    if delete_files:
+        defaults = manifest.get('defaults', {})
+        host_root = _models_root(defaults)
+        rel_path = entry.get('relative_path')
+        if rel_path:
+            candidate_path = host_root / rel_path
+            if candidate_path.exists():
+                try:
+                    candidate_path.unlink()
+                    deleted_path = str(candidate_path)
+                    # attempt to clean empty parent directories under host_root
+                    parent = candidate_path.parent
+                    while parent != host_root and parent.exists():
+                        try:
+                            parent.rmdir()
+                        except OSError:
+                            break
+                        parent = parent.parent
+                except Exception as exc:  # pragma: no cover - best effort cleanup
+                    raise HTTPException(status_code=500, detail=f"Failed to delete model file: {exc}") from exc
+
+    return {"deleted": name, "deleted_path": deleted_path}
 
 
 def _run_cli(args: List[str]) -> CommandResult:
@@ -259,10 +562,21 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             messages=[_message_to_dict(m) for m in req.messages],
             reasoning_effort=req.reasoning_effort,
         )
-        llama_payload: Dict[str, Any] = {'prompt': prompt, 'stream': True}
+        llama_payload: Dict[str, Any] = {
+            'prompt': prompt,
+            'stream': True,
+            'n_predict': 1024,
+            'stop': ['<|im_end|>', '<|end|>', '</s>', 'User:', '\nUser', '\n\nUser'],
+        }
         endpoint = f'{base_url}/completion'
     else:
-        llama_payload = {'messages': [_message_to_dict(m) for m in req.messages], 'stream': True}
+        llama_payload = {
+            'messages': [_message_to_dict(m) for m in req.messages],
+            'stream': True,
+            # Help models stop cleanly; applies to non-GPT-OSS
+            'stop': ['<|im_end|>', '<|end|>', '</s>', 'User:', '\nUser', '\n\nUser'],
+            'max_tokens': 1024,
+        }
         endpoint = f'{base_url}/v1/chat/completions'
 
     client = httpx.AsyncClient(timeout=None)

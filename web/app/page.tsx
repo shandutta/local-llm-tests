@@ -32,6 +32,20 @@ type StatusResponse = {
 type ChatMessage = {
   role: string;
   content: string;
+  meta?: {
+    model?: string;
+    durationMs?: number;
+    tokens?: number;
+    raw?: string;
+  };
+};
+
+type RegisterProgress = {
+  status: string;
+  message?: string | null;
+  downloaded_bytes?: number;
+  total_bytes?: number;
+  file?: string | null;
 };
 
 type ReasoningEffort = "low" | "medium" | "high";
@@ -95,8 +109,116 @@ const normalizeMathDelimiters = (text: string) => {
   return normalized;
 };
 
+const collapseWhitespace = (text: string) => {
+  if (!text) return text;
+  return (
+    text
+      .split("\n")
+      .map((line) => line.replace(/\s+$/, ""))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
+};
+
+const formatAssistantContent = (text: string, model: string | null) => {
+  const cleaned = isGptOssModel(model) ? cleanGptOssText(text) : text;
+  return collapseWhitespace(cleaned);
+};
+
+const stripEndTokens = (text: string) =>
+  text.replace(/<\|im_end\|>|<\|end\|>|\s*<\/s>\s*/gi, " ").trim();
+
+const simplifyPunctuation = (text: string) =>
+  text
+    .replace(/\u2026/g, "...")
+    .replace(/([.?!]){3,}/g, "$1")
+    .replace(/[•·]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+
+const dropPunctuationSpam = (text: string) => {
+  const lines = text.split("\n");
+  const kept: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const nonAlpha = trimmed.replace(/[A-Za-z0-9]/g, "").length;
+    const ratio = nonAlpha / Math.max(1, trimmed.length);
+    if (ratio > 0.9 && trimmed.length > 10) continue;
+    kept.push(trimmed);
+  }
+  return kept.join("\n");
+};
+
+const dedupeAdjacentLines = (text: string) => {
+  const lines = text.split("\n");
+  const deduped: string[] = [];
+  let last = "";
+  for (const line of lines) {
+    if (line.trim() && line.trim() === last) continue;
+    deduped.push(line);
+    last = line.trim();
+  }
+  return deduped.join("\n");
+};
+
+const dedupeParagraphs = (text: string) => {
+  const paras = text.split(/\n\s*\n/);
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const para of paras) {
+    const key = para.trim().slice(0, 120).toLowerCase();
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    kept.push(para);
+  }
+  return kept.join("\n\n");
+};
+
+const dedupeSentences = (text: string) => {
+  const sentences = text.split(/(?<=[.?!])\s+/);
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const sentence of sentences) {
+    const key = sentence.trim().toLowerCase();
+    if (!key) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push(sentence.trim());
+  }
+  return kept.join(" ");
+};
+
+const applyAggressiveClean = (text: string, model: string | null) => {
+  const base = simplifyPunctuation(formatAssistantContent(text, model));
+  const cleaned = dedupeAdjacentLines(dropPunctuationSpam(stripEndTokens(base)));
+  return dedupeSentences(dedupeParagraphs(cleaned));
+};
+
+const PREVIEW_CHAR_LIMIT = 1500;
+
+const buildPreview = (content: string) => {
+  const paragraphs = content.split(/\n\s*\n/).filter(Boolean);
+  const firstPara = paragraphs[0] ?? content;
+  const previewBase = firstPara.slice(0, PREVIEW_CHAR_LIMIT);
+  const truncated =
+    content.length > PREVIEW_CHAR_LIMIT ||
+    firstPara.length < content.length;
+  return { preview: previewBase, truncated };
+};
+
+const SYSTEM_GUARDRAIL =
+  "You are a concise assistant. Default to brief, complete answers, but if the user explicitly asks for long-form (stories, lists, code), provide the requested length. Do not repeat acknowledgments or ask for clarification unless essential. Avoid filler, hedging, and restating the prompt. If greeted, greet once, then respond directly.";
+
+const estimateTokens = (text: string) =>
+  Math.max(1, Math.round(text.length / 4));
+
 export default function Home() {
-  const { data: manifest } = useSWR<ModelManifest>("/models", fetcher);
+  const { data: manifest, mutate: mutateManifest } = useSWR<ModelManifest>(
+    "/models",
+    fetcher,
+  );
   const { data: status } = useSWR<StatusResponse>("/status", fetcher, {
     refreshInterval: 5000,
   });
@@ -113,6 +235,75 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [streamingReply, setStreamingReply] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [modelUrl, setModelUrl] = useState("");
+  const [modelName, setModelName] = useState("");
+  const [modelDescription, setModelDescription] = useState("");
+  const [registerStatus, setRegisterStatus] = useState<string | null>(null);
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [expandedMessages, setExpandedMessages] = useState<Set<number>>(new Set());
+  const [showRawMessages, setShowRawMessages] = useState<Set<number>>(new Set());
+
+  const { data: registerProgress } = useSWR<RegisterProgress>(
+    isRegistering ? "/models/register/status" : null,
+    fetcher,
+    { refreshInterval: 1000 },
+  );
+
+  const markdownComponents = useMemo(
+    () => ({
+      code({
+        inline,
+        className,
+        children,
+        ...props
+      }: {
+        inline?: boolean;
+        className?: string;
+        children?: React.ReactNode;
+      }) {
+        const text = String(children ?? "");
+        if (inline) {
+          return (
+            <code className={className} {...props}>
+              {text}
+            </code>
+          );
+        }
+        const handleCopy = () => {
+          if (typeof navigator !== "undefined" && navigator.clipboard) {
+            navigator.clipboard.writeText(text.trimEnd()).catch(() => {});
+          }
+        };
+        return (
+          <div className="group relative">
+            <pre className="overflow-x-auto rounded-lg border border-zinc-200 bg-white p-3 text-xs leading-5">
+              <code className={className} {...props}>
+                {text}
+              </code>
+            </pre>
+            <button
+              type="button"
+              onClick={handleCopy}
+              className="absolute right-2 top-2 rounded-full bg-white px-2 py-1 text-[10px] font-semibold text-zinc-600 shadow-sm ring-1 ring-zinc-200 opacity-0 transition group-hover:opacity-100"
+            >
+              Copy
+            </button>
+          </div>
+        );
+      },
+    }),
+    [],
+  );
+
+  const renderMarkdown = (content: string) => (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
+      components={markdownComponents}
+    >
+      {normalizeMathDelimiters(content)}
+    </ReactMarkdown>
+  );
 
   const isModelReady = selectedModel && selectedModel === activeModelName;
   const supportsReasoningEffort = isGptOssModel(selectedModel);
@@ -178,6 +369,50 @@ export default function Home() {
     return () => clearInterval(timer);
   }, [pendingAction, isModelBusy]);
 
+  const handleRegisterModel = async () => {
+    if (!modelUrl.trim()) {
+      setRegisterStatus("Paste a Hugging Face link to a GGUF file.");
+      return;
+    }
+    setIsRegistering(true);
+    setRegisterStatus("Starting download… this can take a while for large files.");
+    try {
+      const res = await fetch(`${apiBase}/models/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: modelUrl.trim(),
+          name: modelName.trim() || undefined,
+          description: modelDescription.trim() || undefined,
+        }),
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        const message =
+          payload?.detail?.detail ||
+          payload?.detail?.message ||
+          payload?.detail ||
+          payload?.message ||
+          "Model registration failed";
+        throw new Error(message);
+      }
+      await mutateManifest();
+      setRegisterStatus(
+        `Added ${payload.model} on port ${payload.port}. Start it to chat.`,
+      );
+      setSelectedModel(payload.model);
+      setModelUrl("");
+      setModelName("");
+      setModelDescription("");
+    } catch (err) {
+      setRegisterStatus(
+        err instanceof Error ? err.message : "Failed to register model",
+      );
+    } finally {
+      setIsRegistering(false);
+    }
+  };
+
   const handleCardKeydown = (
     e: React.KeyboardEvent<HTMLDivElement>,
     modelName: string,
@@ -185,6 +420,45 @@ export default function Home() {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       setSelectedModel(modelName);
+    }
+  };
+
+  const toggleExpandMessage = (idx: number) => {
+    setExpandedMessages((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) {
+        next.delete(idx);
+      } else {
+        next.add(idx);
+      }
+      return next;
+    });
+  };
+
+  const toggleRawMessage = (idx: number) => {
+    setShowRawMessages((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) {
+        next.delete(idx);
+      } else {
+        next.add(idx);
+      }
+      return next;
+    });
+  };
+
+  const handleDeleteModel = async (name: string) => {
+    const confirmed = window.confirm(
+      `Delete model '${name}' from the list? (This will not delete the file on disk.)`,
+    );
+    if (!confirmed) return;
+    await fetch(`${apiBase}/models/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    });
+    await mutateManifest();
+    if (selectedModel === name) {
+      const remaining = Object.keys((manifest?.models ?? {})).filter((m) => m !== name);
+      setSelectedModel(remaining[0] ?? null);
     }
   };
 
@@ -209,6 +483,9 @@ export default function Home() {
     setInput("");
     setStreamingReply("");
     setIsStreaming(true);
+    const startTime = performance.now();
+    const modelForMeta = selectedModel;
+    const rawCollector: string[] = [];
 
     let retries = 0;
     const maxRetries = 6;
@@ -222,7 +499,10 @@ export default function Home() {
           body: JSON.stringify({
             model: selectedModel,
             reasoning_effort: reasoning,
-            messages: nextHistory,
+            messages: [
+              { role: "system", content: SYSTEM_GUARDRAIL },
+              ...nextHistory,
+            ],
           }),
         });
 
@@ -300,15 +580,33 @@ export default function Home() {
               payload?.content ??
               "";
             if (!delta) continue;
+            rawCollector.push(delta);
             assistantText += delta;
-            setStreamingReply(assistantText);
+            setStreamingReply(
+              applyAggressiveClean(assistantText, selectedModel),
+            );
           } catch {
             continue;
           }
         }
       }
 
-      setMessages((prev) => [...prev, { role: "assistant", content: assistantText }]);
+      const finalContent = applyAggressiveClean(assistantText, selectedModel);
+      const durationMs = Math.round(performance.now() - startTime);
+      const tokens = estimateTokens(finalContent);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: finalContent,
+          meta: {
+            model: modelForMeta ?? undefined,
+            durationMs,
+            tokens,
+            raw: rawCollector.join(""),
+          },
+        },
+      ]);
       setStreamingReply("");
     } catch (err) {
       console.error(err);
@@ -364,109 +662,206 @@ export default function Home() {
           {!manifest ? (
             <p className="text-zinc-500">Loading manifest…</p>
           ) : (
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              {Object.entries(manifest.models ?? {}).map(([name, model]) => {
-                const isRunning = runningModels.has(name);
-                const isPendingStart =
-                  isModelBusy &&
-                  pendingAction === "start" &&
-                  pendingModel === name;
-                const isPendingStop =
-                  isModelBusy &&
-                  pendingAction === "stop" &&
-                  pendingModel === name;
-                return (
-                  <div
-                    key={name}
-                    className={`rounded-xl border p-4 text-left transition ${
-                      selectedModel === name
-                        ? "border-sky-500 bg-sky-50"
-                        : "border-zinc-200 bg-zinc-50 hover:border-zinc-300"
-                    }`}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setSelectedModel(name)}
-                    onKeyDown={(e) => handleCardKeydown(e, name)}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-lg font-semibold">{name}</p>
-                        {model.port && (
-                          <p className="text-xs text-zinc-500">Port {model.port}</p>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {isRunning && (
-                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">
-                            Active
+            <>
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <div className="rounded-xl border border-dashed border-zinc-300 bg-zinc-50 p-4">
+                  <p className="text-sm font-semibold text-zinc-800">
+                    Add a model from Hugging Face
+                  </p>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Paste a direct GGUF link (https://huggingface.co/.../resolve/main/*.gguf).
+                  </p>
+                  <div className="mt-3 space-y-2">
+                    <input
+                      value={modelUrl}
+                      onChange={(e) => setModelUrl(e.target.value)}
+                      className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm"
+                      placeholder="https://huggingface.co/..."
+                    />
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <input
+                        value={modelName}
+                        onChange={(e) => setModelName(e.target.value)}
+                        className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm"
+                        placeholder="Name (optional)"
+                      />
+                      <input
+                        value={modelDescription}
+                        onChange={(e) => setModelDescription(e.target.value)}
+                        className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm"
+                        placeholder="Description (optional)"
+                      />
+                    </div>
+                    <button
+                      className="w-full rounded-lg bg-zinc-900 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                      disabled={isRegistering}
+                      onClick={handleRegisterModel}
+                    >
+                      {isRegistering ? "Downloading…" : "Download & Register"}
+                    </button>
+                    {registerProgress && registerProgress.status !== "idle" && (
+                      <div className="space-y-1 text-xs text-zinc-600">
+                        <div className="flex items-center justify-between">
+                          <span>
+                            {registerProgress.message ??
+                              (registerProgress.status === "completed"
+                                ? "Download complete"
+                                : registerProgress.status)}
                           </span>
-                        )}
-                        <span
-                          className={`h-3 w-3 rounded-full ${
-                            isRunning ? "bg-emerald-500" : "bg-zinc-300"
-                          }`}
-                        />
+                          {registerProgress.total_bytes ? (
+                            <span>
+                              {Math.round(
+                                ((registerProgress.downloaded_bytes ?? 0) /
+                                  registerProgress.total_bytes) *
+                                  100,
+                              )}
+                              %
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200">
+                          <div
+                            className="h-full rounded-full bg-zinc-900 transition-[width]"
+                            style={{
+                              width: registerProgress.total_bytes
+                                ? `${Math.min(
+                                    100,
+                                    Math.round(
+                                      ((registerProgress.downloaded_bytes ?? 0) /
+                                        registerProgress.total_bytes) *
+                                        100,
+                                    ),
+                                  )}%`
+                                : "35%",
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {registerStatus && (
+                      <p className="text-xs text-zinc-600">{registerStatus}</p>
+                    )}
+                  </div>
+                </div>
+
+                {Object.entries(manifest.models ?? {}).map(([name, model]) => {
+                  const isRunning = runningModels.has(name);
+                  const isPendingStart =
+                    isModelBusy &&
+                    pendingAction === "start" &&
+                    pendingModel === name;
+                  const isPendingStop =
+                    isModelBusy &&
+                    pendingAction === "stop" &&
+                    pendingModel === name;
+                  return (
+                    <div
+                      key={name}
+                      className={`rounded-xl border p-4 text-left transition ${
+                        selectedModel === name
+                          ? "border-sky-500 bg-sky-50"
+                          : "border-zinc-200 bg-zinc-50 hover:border-zinc-300"
+                      }`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedModel(name)}
+                      onKeyDown={(e) => handleCardKeydown(e, name)}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-lg font-semibold">{name}</p>
+                          {model.port && (
+                            <p className="text-xs text-zinc-500">Port {model.port}</p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {isRunning && (
+                            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                              Active
+                            </span>
+                          )}
+                          <span
+                            className={`h-3 w-3 rounded-full ${
+                              isRunning ? "bg-emerald-500" : "bg-zinc-300"
+                            }`}
+                          />
+                          <button
+                            className="text-xs font-semibold text-rose-600 underline"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteModel(name);
+                            }}
+                            disabled={isRunning}
+                            title={
+                              isRunning
+                                ? "Stop the model before deleting the entry"
+                                : "Remove from manifest"
+                            }
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                      <p className="mt-2 text-sm text-zinc-600">
+                        {model.description ?? "No description provided."}
+                      </p>
+                      <div className="mt-4 flex gap-2 text-sm text-zinc-500">
+                        <button
+                          className="rounded-full bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
+                          disabled={
+                            isModelBusy && !isPendingStart && pendingAction !== null
+                          }
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if (isModelBusy && !isPendingStart) return;
+                            setIsModelBusy(true);
+                            setPendingModel(name);
+                            setPendingAction("start");
+                            await fetch(`${apiBase}/start`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ model: name }),
+                            }).catch(() => {
+                              setIsModelBusy(false);
+                              setPendingAction(null);
+                              setPendingModel(null);
+                            });
+                          }}
+                        >
+                          {isPendingStart
+                            ? "Starting…"
+                            : isRunning
+                            ? "Restart"
+                            : "Start"}
+                        </button>
+                        <button
+                          className="rounded-full border border-zinc-300 px-3 py-1 disabled:opacity-50"
+                          disabled={
+                            isPendingStart ||
+                            (isModelBusy && !isPendingStop) ||
+                            !isRunning
+                          }
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            if ((!isPendingStop && isModelBusy) || !isRunning) return;
+                            setIsModelBusy(true);
+                            setPendingModel(name);
+                            setPendingAction("stop");
+                            await fetch(`${apiBase}/stop`, { method: "POST" }).catch(() => {
+                              setIsModelBusy(false);
+                              setPendingAction(null);
+                              setPendingModel(null);
+                            });
+                          }}
+                        >
+                          {isPendingStop ? "Stopping…" : "Stop"}
+                        </button>
                       </div>
                     </div>
-                    <p className="mt-2 text-sm text-zinc-600">
-                      {model.description ?? "No description provided."}
-                    </p>
-                    <div className="mt-4 flex gap-2 text-sm text-zinc-500">
-                      <button
-                        className="rounded-full bg-zinc-900 px-3 py-1 text-white disabled:opacity-50"
-                        disabled={
-                          isModelBusy && !isPendingStart && pendingAction !== null
-                        }
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          if (isModelBusy && !isPendingStart) return;
-                          setIsModelBusy(true);
-                          setPendingModel(name);
-                          setPendingAction("start");
-                          await fetch(`${apiBase}/start`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ model: name }),
-                          }).catch(() => {
-                            setIsModelBusy(false);
-                            setPendingAction(null);
-                            setPendingModel(null);
-                          });
-                        }}
-                      >
-                        {isPendingStart
-                          ? "Starting…"
-                          : isRunning
-                          ? "Restart"
-                          : "Start"}
-                      </button>
-                      <button
-                        className="rounded-full border border-zinc-300 px-3 py-1 disabled:opacity-50"
-                        disabled={
-                          isPendingStart ||
-                          (isModelBusy && !isPendingStop) ||
-                          !isRunning
-                        }
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          if ((!isPendingStop && isModelBusy) || !isRunning) return;
-                          setIsModelBusy(true);
-                          setPendingModel(name);
-                          setPendingAction("stop");
-                          await fetch(`${apiBase}/stop`, { method: "POST" }).catch(() => {
-                            setIsModelBusy(false);
-                            setPendingAction(null);
-                            setPendingModel(null);
-                          });
-                        }}
-                      >
-                        {isPendingStop ? "Stopping…" : "Stop"}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
+            </>
           )}
         </section>
 
@@ -532,49 +927,112 @@ export default function Home() {
                     isGptOss && msg.content.includes("<|channel|>")
                       ? parseGptOssContent(msg.content)
                       : { analysis: undefined, final: msg.content };
+                  const raw = msg.meta?.raw;
+                  const cleaned = applyAggressiveClean(
+                    final ?? msg.content,
+                    selectedModel,
+                  );
+                  const contentToRender = showRawMessages.has(idx)
+                    ? raw || final || msg.content
+                    : cleaned || final || msg.content;
+                  const expanded = expandedMessages.has(idx);
+                  const { preview, truncated } = buildPreview(contentToRender ?? "");
+                  const showContent =
+                    !expanded && !showRawMessages.has(idx) && truncated ? preview : contentToRender;
+                  const isAssistant = msg.role === "assistant";
+                  const meta = msg.meta ?? {};
+                  const isLong = truncated || (showContent?.length ?? 0) > 1200;
                   return (
-                    <div key={`${msg.role}-${idx}`} className="text-sm leading-6">
-                      <p className="font-semibold text-zinc-700">{prettyRole}</p>
+                    <div
+                      key={`${msg.role}-${idx}`}
+                      className={`rounded-xl border p-4 text-sm leading-6 ${
+                        isAssistant ? "bg-zinc-50" : "bg-white"
+                      }`}
+                    >
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span
+                          className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                            isAssistant
+                              ? "bg-sky-100 text-sky-700"
+                              : "bg-zinc-100 text-zinc-700"
+                          }`}
+                        >
+                          {prettyRole}
+                        </span>
+                        {isAssistant && (
+                          <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                            {meta.model && (
+                              <span className="rounded-full bg-white px-2 py-0.5 ring-1 ring-zinc-200">
+                                {meta.model}
+                              </span>
+                            )}
+                            {typeof meta.durationMs === "number" && (
+                              <span className="rounded-full bg-white px-2 py-0.5 ring-1 ring-zinc-200">
+                                {meta.durationMs} ms
+                              </span>
+                            )}
+                            {typeof meta.tokens === "number" && (
+                              <span className="rounded-full bg-white px-2 py-0.5 ring-1 ring-zinc-200">
+                                ~{meta.tokens} tokens
+                              </span>
+                            )}
+                            {raw && (
+                              <button
+                                className="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-sky-700 ring-1 ring-sky-200"
+                                onClick={() => toggleRawMessage(idx)}
+                              >
+                                {showRawMessages.has(idx) ? "View cleaned" : "View raw"}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
                       {analysis && (
-                        <details className="mb-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600">
+                        <details className="mb-2 rounded-lg border border-zinc-200 bg-white p-3 text-xs text-zinc-700">
                           <summary className="cursor-pointer select-none text-zinc-700">
                             Reasoning trace
                           </summary>
-                          <div className="prose prose-sm max-w-none text-zinc-800">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm, remarkMath]}
-                            rehypePlugins={[rehypeKatex]}
-                          >
-                            {normalizeMathDelimiters(analysis)}
-                          </ReactMarkdown>
-                        </div>
-                      </details>
-                    )}
-                    <div className="prose prose-sm max-w-none text-zinc-800">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm, remarkMath]}
-                        rehypePlugins={[rehypeKatex]}
+                          <div className="prose prose-xs max-w-none text-zinc-800">
+                            {renderMarkdown(analysis)}
+                          </div>
+                        </details>
+                      )}
+                      <div
+                        className={`prose prose-sm max-w-none text-zinc-800 ${
+                          !expanded && isLong ? "relative max-h-64 overflow-hidden" : ""
+                        }`}
                       >
-                        {normalizeMathDelimiters(final)}
-                      </ReactMarkdown>
-                    </div>
-                  </div>
-                );
-              })}
-                {streamingReply && (
-                  <div className="text-sm leading-6">
-                    <p className="font-semibold text-zinc-700">Assistant (streaming)</p>
-                    <div className="prose prose-sm max-w-none text-zinc-800">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm, remarkMath]}
-                        rehypePlugins={[rehypeKatex]}
-                      >
-                        {normalizeMathDelimiters(
-                          isGptOssModel(selectedModel)
-                            ? cleanGptOssText(streamingReply)
-                            : streamingReply,
+                        {renderMarkdown(showContent)}
+                        {!expanded && isLong && (
+                          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-zinc-50 to-transparent" />
                         )}
-                      </ReactMarkdown>
+                      </div>
+                      {isLong && (
+                        <button
+                          className="mt-2 text-xs font-semibold text-sky-700"
+                          onClick={() => toggleExpandMessage(idx)}
+                        >
+                          {expanded ? "Show less" : "Show more"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+                {streamingReply && (
+                  <div className="rounded-xl border border-dashed border-zinc-300 bg-white p-4 text-sm leading-6">
+                    <div className="mb-2 flex items-center gap-2">
+                      <span className="rounded-full bg-sky-100 px-2 py-0.5 text-xs font-semibold text-sky-700">
+                        Assistant
+                      </span>
+                      <span className="flex items-center gap-1 text-[11px] font-semibold text-sky-700">
+                        <span className="h-2 w-2 animate-pulse rounded-full bg-sky-500" />
+                        Streaming…
+                      </span>
+                    </div>
+                    <div className="prose prose-sm max-w-none text-zinc-800">
+                      {renderMarkdown(
+                        formatAssistantContent(streamingReply, selectedModel),
+                      )}
                     </div>
                   </div>
                 )}

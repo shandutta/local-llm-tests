@@ -106,6 +106,25 @@ Most desktop environments will prompt you to “Trust” newly copied `.desktop`
   `setx LOCAL_LLM_WSL_HOME "/home/youruser"`
 - The batch files pause after execution so you can read any errors; keep them in a visible terminal window to watch startup progress if desired.
 
+## Add models from Hugging Face (GGUF)
+
+- Use the web UI: in **Models**, click **Add a model from Hugging Face**, paste a GGUF `.../resolve/<rev>/file.gguf` link, optionally set name/description, then **Download & Register**. After it finishes, click **Start** on the new card to run it.
+- API equivalent: `POST /models/register` with `{"source":"<hf GGUF link>"}` (optionally `name`, `description`, `port`, `arguments`). The response returns the new model name and port; then `POST /start {"model":"<name>"}`.
+- Storage: files download into the models root (`LOCAL_LLM_MODELS_DIR` or the manifest default) under `<repo_id>/...`. The manifest is updated in-place at `config/models.yaml` (JSON-encoded).
+- Auth: public models need no token. For private repos, set `HF_TOKEN` in the environment before starting the FastAPI server; the token is only read at runtime and not stored to disk.
+
+## Backend development quickstart
+
+```bash
+cd /home/shan/local-llm-tests
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r server/requirements.txt
+uvicorn server.main:app --reload --port 8008
+```
+
+With the venv active, `HF_TOKEN=...` can be set in the same shell if you need to pull private Hugging Face models.
+
 ### Remote/SSH access & vLLM option
 
 - For the FP8 Qwen3 Coder 30B stack served via vLLM, follow `docs/vllm-code-completion.md` (local) or `docs/vast-ai.md` (cloud). Both serve an OpenAI-compatible endpoint on port 8004 using `bin/local-vllm`.

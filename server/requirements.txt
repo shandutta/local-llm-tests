@@ -3,3 +3,4 @@ uvicorn==0.32.1
 PyYAML==6.0.2
 httpx==0.27.2
 unsloth-zoo==2024.10.2
+huggingface_hub==0.26.5

@@ -2,15 +2,13 @@
 
 This Next.js app will become the control plane and chat UI for the Local LLM Tests project. It lives in `/home/shan/local-llm-tests/web` and talks to the FastAPI backend (`server/main.py`) through the `NEXT_PUBLIC_API_BASE` environment variable.
 
-## Bootstrap status
+## Current status
 
-- ✅ create-next-app with App Router, Tailwind, TypeScript, ESLint.
-- ✅ Added SWR for simple data fetching.
-- ✅ `.env.local` seeded with `NEXT_PUBLIC_API_BASE=http://localhost:8008`.
-- ❌ No UI yet – the next step is to build:
-  - A dashboard view that lists models/status (GET `/models`, `/status`).
-  - Actions that hit `/start`, `/stop`, `/restart`.
-  - A chat workspace that formats GPT-OSS prompts via Harmony and streams llama.cpp responses.
+- Next.js + Tailwind + TypeScript + SWR, App Router.
+- `.env.local` includes `NEXT_PUBLIC_API_BASE=http://localhost:8008`.
+- Models dashboard shows status, allows start/stop/restart, and polls `/status`.
+- Chat console streams responses; GPT-OSS runs through Harmony formatting with reasoning-effort selector.
+- “Add a model from Hugging Face” card lets you paste a GGUF link; it calls `/models/register`, refreshes the manifest, and lets you start the new model from its card.
 
 ## Development
 
@@ -31,6 +29,7 @@ uvicorn server.main:app --reload --port 8008
 - Model cards display an “Active” badge when the container is live.
 - Header progress bar visualizes start/stop transitions; chat unlocks once the selected model is active.
 - Assistant responses render markdown (including bold/lists), and Ctrl+Enter sends a message.
+- Hugging Face imports require the backend to be running with network access; private repos need `HF_TOKEN` set in the backend environment.
 
 ## Next milestones
 
