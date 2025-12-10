@@ -109,6 +109,7 @@ Most desktop environments will prompt you to “Trust” newly copied `.desktop`
 ## Add models from Hugging Face (GGUF)
 
 - Use the web UI: in **Models**, click **Add a model from Hugging Face**, paste a GGUF `.../resolve/<rev>/file.gguf` link, optionally set name/description, then **Download & Register**. After it finishes, click **Start** on the new card to run it.
+- If you paste a repo URL (not a direct file), the backend auto-selects the largest GGUF that fits the VRAM budget (defaults to 32 GiB for the RTX 5090). Override with `LOCAL_LLM_VRAM_GB` or `LOCAL_LLM_VRAM_BYTES` when starting the API, or supply a direct GGUF link to force a specific file.
 - API equivalent: `POST /models/register` with `{"source":"<hf GGUF link>"}` (optionally `name`, `description`, `port`, `arguments`). The response returns the new model name and port; then `POST /start {"model":"<name>"}`.
 - Storage: files download into the models root (`LOCAL_LLM_MODELS_DIR` or the manifest default) under `<repo_id>/...`. The manifest is updated in-place at `config/models.yaml` (JSON-encoded).
 - Auth: public models need no token. For private repos, set `HF_TOKEN` in the environment before starting the FastAPI server; the token is only read at runtime and not stored to disk.

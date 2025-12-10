@@ -72,6 +72,36 @@
         "--flash-attn",
         "on"
       ]
+    },
+    "devstral-small-2-24b": {
+      "description": "Devstral-Small-2-24B",
+      "relative_path": "bartowski/mistralai_Devstral-Small-2-24B-Instruct-2512-GGUF/mistralai_Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf",
+      "port": 8003,
+      "arguments": [
+        "--alias",
+        "devstral-small-2-24b",
+        "--chat-template",
+        "chatml",
+        "--n-gpu-layers",
+        "999",
+        "--ctx-size",
+        "32768",
+        "--threads",
+        "14",
+        "--threads-batch",
+        "16",
+        "--temp",
+        "0.7",
+        "--top-p",
+        "0.9",
+        "--top-k",
+        "40",
+        "--repeat-penalty",
+        "1.05",
+        "--parallel",
+        "1",
+        "--cont-batching"
+      ]
     }
   }
 }

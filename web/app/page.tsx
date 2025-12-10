@@ -208,9 +208,6 @@ const buildPreview = (content: string) => {
   return { preview: previewBase, truncated };
 };
 
-const SYSTEM_GUARDRAIL =
-  "You are a concise assistant. Default to brief, complete answers, but if the user explicitly asks for long-form (stories, lists, code), provide the requested length. Do not repeat acknowledgments or ask for clarification unless essential. Avoid filler, hedging, and restating the prompt. If greeted, greet once, then respond directly.";
-
 const estimateTokens = (text: string) =>
   Math.max(1, Math.round(text.length / 4));
 
@@ -227,8 +224,6 @@ export default function Home() {
   const [isModelBusy, setIsModelBusy] = useState(false);
   const [activeModelName, setActiveModelName] = useState<string | null>(null);
   const [pendingModel, setPendingModel] = useState<string | null>(null);
-  const [pendingAction, setPendingAction] = useState<"start" | "stop" | null>(null);
-  const [reasoning, setReasoning] = useState<ReasoningEffort>("medium");
   const [progress, setProgress] = useState(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatStatus, setChatStatus] = useState<string | null>(null);
@@ -498,9 +493,7 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             model: selectedModel,
-            reasoning_effort: reasoning,
             messages: [
-              { role: "system", content: SYSTEM_GUARDRAIL },
               ...nextHistory,
             ],
           }),
@@ -669,14 +662,14 @@ export default function Home() {
                     Add a model from Hugging Face
                   </p>
                   <p className="mt-1 text-xs text-zinc-500">
-                    Paste a direct GGUF link (https://huggingface.co/.../resolve/main/*.gguf).
+                    Paste a repo or GGUF link; we auto-pick the largest file that fits your GPU.
                   </p>
                   <div className="mt-3 space-y-2">
                     <input
                       value={modelUrl}
                       onChange={(e) => setModelUrl(e.target.value)}
                       className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm"
-                      placeholder="https://huggingface.co/..."
+                      placeholder="org/repo or https://huggingface.co/.../file.gguf"
                     />
                     <div className="grid gap-2 md:grid-cols-2">
                       <input
@@ -872,30 +865,6 @@ export default function Home() {
               <p className="text-sm text-zinc-500">
                 Streams are proxied through Harmony for GPT-OSS.
               </p>
-            </div>
-            <div className="flex gap-3">
-              <label className="text-sm text-zinc-600">
-                Reasoning effort
-                <select
-                  value={reasoning}
-                  onChange={(e) => setReasoning(e.target.value as ReasoningEffort)}
-                  disabled={!supportsReasoningEffort}
-                  className={`ml-2 rounded-lg border px-2 py-1 text-sm ${
-                    supportsReasoningEffort
-                      ? "border-zinc-300"
-                      : "cursor-not-allowed border-zinc-200 bg-zinc-100 text-zinc-400"
-                  }`}
-                >
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                </select>
-                {!supportsReasoningEffort && (
-                  <span className="ml-2 text-xs text-zinc-400">
-                    (Only available for GPT-OSS)
-                  </span>
-                )}
-              </label>
             </div>
           </div>
 

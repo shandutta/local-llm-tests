@@ -9,6 +9,7 @@ This Next.js app will become the control plane and chat UI for the Local LLM Tes
 - Models dashboard shows status, allows start/stop/restart, and polls `/status`.
 - Chat console streams responses; GPT-OSS runs through Harmony formatting with reasoning-effort selector.
 - “Add a model from Hugging Face” card lets you paste a GGUF link; it calls `/models/register`, refreshes the manifest, and lets you start the new model from its card.
+- If you paste a repo URL (not a direct file), the backend auto-selects the largest GGUF that fits the VRAM budget (defaults to 32 GiB; override with `LOCAL_LLM_VRAM_GB` when starting the API).
 
 ## Development
 

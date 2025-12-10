@@ -18,19 +18,40 @@ from fastapi.responses import StreamingResponse
 from huggingface_hub import HfApi, hf_hub_download, hf_hub_url
 from pydantic import BaseModel
 
-try:
-    from unsloth_zoo import encode_conversations_with_harmony as _encode_harmony
-except Exception:  # pragma: no cover - fallback when package missing
-    _encode_harmony = None
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / 'config' / 'models.yaml'
 CLI_PATH = REPO_ROOT / 'bin' / 'local-llm'
 COMPOSE_FILE = REPO_ROOT / 'virtualization' / 'docker' / 'docker-compose.yaml'
 ENV_FILE = REPO_ROOT / 'virtualization' / 'docker' / '.env.runtime'
 
-HARMONY_MODELS = {'gpt-oss-120b'}
-CUSTOM_HARMONY_PROMPT = os.environ.get('HARMONY_SYSTEM_PROMPT')
+# Revised system prompts for a better user experience, catering to general chat, coding, and creative tasks.
+SYSTEM_PROMPTS = {
+    'default': (
+        "You are a helpful and versatile AI assistant. Your goal is to provide accurate, relevant, and creative responses. "
+        "You can assist with a wide range of tasks, including answering questions, providing explanations, generating text, and offering creative ideas. "
+        "Please be friendly, engaging, and tailor your responses to the user's needs."
+    ),
+    'gpt-oss-120b': (
+        "You are GPT-OSS-120B, a powerful and creative AI assistant. You are an expert programmer but also an engaging and helpful chat partner. "
+        "Start by greeting the user and responding to their immediate question. Do not assume they want to discuss code unless they mention it. "
+        "Be conversational and helpful. After you've responded to their initial message, you can ask how you can help. "
+        "When you are asked to write or discuss code, provide detailed explanations, innovative ideas, and high-quality code. "
+        "Follow best practices and provide comments for complex logic."
+    ),
+    'qwen3-coder': (
+        "You are Qwen3-Coder, a specialized AI assistant for code generation and programming-related tasks. "
+        "Your primary focus is to provide accurate, efficient, and high-quality code. "
+        "You can also engage in technical discussions, explain complex concepts, and help with debugging. "
+        "While your main role is coding, you can also participate in casual conversation. "
+        "When generating code, make sure it is clean, well-documented, and follows modern standards."
+    ),
+    'devstral-small-2-24b': (
+        "You are Devstral, a friendly and knowledgeable AI assistant. You are a capable programmer, but your primary goal is to be a helpful and engaging conversationalist. "
+        "Provide clear and concise answers, and don't be afraid to ask clarifying questions. "
+        "Your tone should be approachable and friendly. When asked to code, provide clean and simple examples."
+    ),
+}
+
 
 app = FastAPI(title='Local LLM Orchestrator', version='0.2.0')
 app.add_middleware(
@@ -95,44 +116,53 @@ REGISTER_PROGRESS: Dict[str, Any] = {
 }
 
 
-def encode_harmony_prompt(messages: List[Dict[str, Any]], reasoning_effort: str) -> str:
-    """
-    Use Unsloth's Harmony helper when available, otherwise fall back to a
-    lightweight ChatML-style template so GPT-OSS still receives a structured prompt.
-    """
-    if CUSTOM_HARMONY_PROMPT:
-        system_text = CUSTOM_HARMONY_PROMPT.format(reasoning_effort=reasoning_effort)
-        lines = ["<|start|>system", system_text, "<|end|>"]
-        for message in messages:
-            role = message.get("role", "user")
-            content = message.get("content", "")
-            lines.append(f"<|start|>{role}")
-            lines.append(content)
-            lines.append("<|end|>")
-        lines.append("<|start|>assistant")
-        return "\n".join(lines)
+@app.post('/chat')
+async def chat(req: ChatRequest) -> StreamingResponse:
+    model_entry = _resolve_model(req.model)
+    port = model_entry.get('port')
+    if not port:
+        raise HTTPException(status_code=400, detail=f"Model '{req.model}' missing port configuration")
+    base_url = f'http://127.0.0.1:{port}'
 
-    if _encode_harmony is not None:
-        return _encode_harmony(
-            messages=messages,
-            reasoning_effort=reasoning_effort,
-            add_generation_prompt=True,
-        )
+    system_prompt = SYSTEM_PROMPTS.get(req.model, SYSTEM_PROMPTS['default'])
+    messages = [{'role': 'system', 'content': system_prompt}] + [_message_to_dict(m) for m in req.messages]
 
-    # Fallback ChatML rendering
-    lines = [
-        "<|start|>system",
-        f"You are GPT-OSS. Reasoning effort: {reasoning_effort}.",
-        "<|end|>",
-    ]
-    for message in messages:
-        role = message.get("role", "user")
-        content = message.get("content", "")
-        lines.append(f"<|start|>{role}")
-        lines.append(content)
-        lines.append("<|end|>")
-    lines.append("<|start|>assistant")
-    return "\n".join(lines)
+    llama_payload = {
+        'messages': messages,
+        'stream': True,
+        'max_tokens': 4096,  # Increased max_tokens for more detailed responses
+        'stop': ['<|im_end|>', '<|end|>', '</s>', 'User:', '\nUser', '\n\nUser'],
+    }
+    endpoint = f'{base_url}/v1/chat/completions'
+
+    client = httpx.AsyncClient(timeout=None)
+    try:
+        stream_ctx = client.stream('POST', endpoint, json=llama_payload)
+        response = await stream_ctx.__aenter__()
+
+        if response.status_code != 200:
+            body = await response.aread()
+            await stream_ctx.__aexit__(None, None, None)
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=body.decode() or 'llama-server error',
+            )
+
+        async def stream_llama():
+            try:
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n".encode()
+            finally:
+                await stream_ctx.__aexit__(None, None, None)
+                await client.aclose()
+
+        return StreamingResponse(stream_llama(), media_type='text/event-stream')
+    except httpx.ConnectError as e:
+        raise HTTPException(status_code=503, detail=f"Connection to model endpoint failed: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
 
 def _load_manifest() -> Dict[str, Any]:
@@ -198,10 +228,81 @@ def _set_progress(**kwargs):
     REGISTER_PROGRESS.update(**kwargs)
 
 
+def _vram_limit_bytes() -> int:
+    """
+    Return the VRAM budget in bytes used to auto-pick a GGUF file.
+    Defaults to 32 GiB (RTX 5090), and can be overridden via:
+      - LOCAL_LLM_VRAM_BYTES (integer bytes)
+      - LOCAL_LLM_VRAM_GB (float/integer GiB)
+    """
+    if os.environ.get("LOCAL_LLM_VRAM_BYTES"):
+        try:
+            return int(os.environ["LOCAL_LLM_VRAM_BYTES"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="LOCAL_LLM_VRAM_BYTES must be an integer") from exc
+
+    if os.environ.get("LOCAL_LLM_VRAM_GB"):
+        try:
+            gb = float(os.environ["LOCAL_LLM_VRAM_GB"])
+            return int(gb * 1024**3)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="LOCAL_LLM_VRAM_GB must be numeric") from exc
+
+    return 32 * 1024**3
+
+
+def _select_best_gguf_file(api: HfApi, repo_id: str, revision: str, vram_limit_bytes: int) -> str:
+    """
+    Choose the largest GGUF file in a repo that fits within the VRAM budget.
+    Falls back to quantization name hints if size metadata is missing.
+    """
+    try:
+        info = api.repo_info(repo_id=repo_id, revision=revision, files_metadata=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to inspect repository: {exc}") from exc
+
+    ggufs = [
+        (s.rfilename, s.size or 0)
+        for s in getattr(info, "siblings", [])
+        if s.rfilename.lower().endswith(".gguf")
+    ]
+
+    if not ggufs:
+        raise HTTPException(status_code=400, detail="No GGUF files found in that repository")
+
+    within_limit = [(name, size) for name, size in ggufs if size and size <= vram_limit_bytes]
+    if within_limit:
+        best = max(within_limit, key=lambda item: (item[1], item[0]))
+        return best[0]
+
+    known_sizes = [(name, size) for name, size in ggufs if size]
+    if known_sizes:
+        smallest = min(known_sizes, key=lambda item: (item[1], item[0]))
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No GGUF files fit the configured VRAM limit "
+                f"({vram_limit_bytes / 1024**3:.1f} GiB). "
+                f"Smallest available is {smallest[1] / 1024**3:.1f} GiB ({smallest[0]}). "
+                "Set LOCAL_LLM_VRAM_GB or specify a file name directly."
+            ),
+        )
+
+    # Fall back to quantization markers if we couldn't get sizes
+    priority = ['q8', 'q6', 'q5_1', 'q5', 'q4_k_m', 'q4', 'q3', 'q2']
+    for marker in priority:
+        for name, _ in ggufs:
+            if marker in name.lower():
+                return name
+
+    return sorted(name for name, _ in ggufs)[0]
+
+
 def _parse_huggingface_source(source: str) -> tuple[str, str | None, str]:
     """
     Return (repo_id, filename, revision) for Hugging Face URLs or hf:// links.
     Accepted:
+      - org/repo or org/repo/file.gguf (revision defaults to main)
       - https://huggingface.co/org/repo/resolve/main/path/to/file.gguf
       - https://huggingface.co/org/repo/blob/v1.0/model.gguf
       - https://huggingface.co/org/repo (repo root; filename picked automatically)
@@ -212,6 +313,15 @@ def _parse_huggingface_source(source: str) -> tuple[str, str | None, str]:
 
     parsed = urlparse(source)
     path_parts = [part for part in parsed.path.split('/') if part]
+
+    if not parsed.scheme and not parsed.netloc:
+        # plain org/repo or org/repo/file.gguf
+        if len(path_parts) == 2:
+            return '/'.join(path_parts), None, 'main'
+        if len(path_parts) > 2:
+            repo_id = '/'.join(path_parts[:2])
+            filename = '/'.join(path_parts[2:])
+            return repo_id, filename, 'main'
 
     if parsed.scheme == 'hf':
         # netloc contains the org; path contains the remainder
@@ -242,7 +352,7 @@ def _parse_huggingface_source(source: str) -> tuple[str, str | None, str]:
 
     raise HTTPException(
         status_code=400,
-        detail='Unsupported source. Provide a huggingface.co link or hf://org/repo/file.gguf',
+        detail='Unsupported source. Provide huggingface.co/org/repo, org/repo, or hf://org/repo/file.gguf',
     )
 
 
@@ -283,23 +393,14 @@ def register_model(req: RegisterModelRequest) -> Dict[str, Any]:
     models = manifest.setdefault('models', {})
 
     repo_id, filename, revision = _parse_huggingface_source(req.source)
+    vram_limit_bytes = _vram_limit_bytes()
     api = HfApi(token=os.environ.get('HF_TOKEN'))
 
     if filename is None or not filename.lower().endswith('.gguf'):
-        # If user pasted a repo link or non-resolve URL, pick a GGUF file for them.
-        candidates = [f for f in api.list_repo_files(repo_id=repo_id, revision=revision) if f.lower().endswith('.gguf')]
-        if not candidates:
-            raise HTTPException(status_code=400, detail='No GGUF files found in that repository')
-        priority = ['Q5_1', 'Q5', 'Q4_K_M', 'Q4', 'Q8_0', 'Q8']
-        chosen = None
-        for marker in priority:
-            for candidate in candidates:
-                if marker.lower() in candidate.lower():
-                    chosen = candidate
-                    break
-            if chosen:
-                break
-        filename = chosen or sorted(candidates)[0]
+        # If user pasted a repo link or non-resolve URL, pick the largest GGUF
+        # that fits the configured VRAM budget (defaults to 32 GiB for RTX 5090).
+        _set_progress(status="selecting", message="Selecting best GGUF for GPU VRAM…")
+        filename = _select_best_gguf_file(api, repo_id, revision, vram_limit_bytes)
 
     if not filename.lower().endswith('.gguf'):
         raise HTTPException(status_code=400, detail='Only GGUF files are supported right now')
